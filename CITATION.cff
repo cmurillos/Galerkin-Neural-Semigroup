@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using this metadata."
+title: "Galerkin Neural Semigroup"
+type: software
+authors:
+  - family-names: "Murillo"
+    given-names: "Carlos Andrés"
+repository-code: "https://github.com/cmurillos/Galerkin-Neural-Semigroup"
+license: BSD-3-Clause
+version: 0.1.0

@@ -1,0 +1,82 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import torch
+
+from galerkin_neural_semigroup import NeuralSemigroup
+
+from ._fixtures import heat_problem
+
+
+class TrainingTests(unittest.TestCase):
+    def test_linear_training_reduces_independent_field_error(self):
+        problem = heat_problem()
+        semigroup = problem.train(
+            hidden=(),
+            lipschitz=2.0,
+            samples=128,
+            batch_size=32,
+            epochs=40,
+            lr=2e-2,
+            seed=4,
+            device="cpu",
+        )
+        self.assertIsInstance(semigroup, NeuralSemigroup)
+        self.assertLess(
+            semigroup.metrics["training_loss"],
+            semigroup.history["training_loss"][0],
+        )
+        self.assertTrue(semigroup.metrics["validation_loss"] >= 0)
+        self.assertLessEqual(
+            semigroup.metrics["effective_lipschitz_bound"],
+            2.0 * (1 + 1e-12),
+        )
+        self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
+        self.assertIn("quadrature_order", semigroup.metadata["reference"])
+        self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
+
+    def test_checkpoint_round_trip_uses_same_problem(self):
+        problem = heat_problem()
+        semigroup = problem.train(
+            hidden=(4,),
+            lipschitz=1.5,
+            samples=32,
+            batch_size=16,
+            epochs=3,
+            lr=1e-2,
+            seed=1,
+            device="cpu",
+        )
+        states = torch.randn(5, problem.dimension, dtype=semigroup.dtype)
+        expected = semigroup.field(states)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.gns"
+            semigroup.save(path)
+            restored = problem.load(path, device="cpu")
+        torch.testing.assert_close(restored.field(states), expected)
+        self.assertEqual(dict(restored.metrics), dict(semigroup.metrics))
+        self.assertEqual(dict(restored.history), dict(semigroup.history))
+
+    def test_load_rejects_different_training_domain(self):
+        problem = heat_problem(radius=1.0)
+        semigroup = problem.train(
+            hidden=(),
+            lipschitz=2.0,
+            samples=16,
+            batch_size=8,
+            epochs=1,
+            lr=1e-2,
+            seed=0,
+            device="cpu",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.gns"
+            semigroup.save(path)
+            incompatible = heat_problem(radius=2.0)
+            with self.assertRaisesRegex(ValueError, "radii"):
+                incompatible.load(path, device="cpu")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling>=1.27,<1.32"]
+build-backend = "hatchling.build"
+
+[project]
+name = "galerkin-neural-semigroup"
+version = "0.1.0"
+description = "Galerkin-supervised neural flows with exact semigroup structure"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Carlos Andrés Murillo" }]
+keywords = [
+  "Galerkin",
+  "neural ordinary differential equations",
+  "semigroups",
+  "scientific machine learning",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+  "torch>=2.4,<3",
+  "numerical-galerkin-field @ git+https://github.com/cmurillos/Numerical-Galerkin-Field.git@9f7f71c1d70858cc5939d782373d0029ecea6717",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1", "build>=1.2,<2"]
+
+[project.urls]
+Homepage = "https://github.com/cmurillos/Galerkin-Neural-Semigroup"
+Source = "https://github.com/cmurillos/Galerkin-Neural-Semigroup"
+Issues = "https://github.com/cmurillos/Galerkin-Neural-Semigroup/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/galerkin_neural_semigroup"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/examples",
+  "/docs",
+  "/README.md",
+  "/LICENSE",
+  "/CITATION.cff",
+  "/CHANGELOG.md",
+  "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["cuda: requires a CUDA-capable PyTorch installation"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
