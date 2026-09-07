@@ -2,9 +2,9 @@
 
 import numpy as np
 import torch
+from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
 
 from galerkin_neural_semigroup import NeuralSemigroupProblem
-from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
 
 
 def main():

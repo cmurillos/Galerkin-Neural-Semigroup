@@ -1,7 +1,7 @@
 import numpy as np
+from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
 
 from galerkin_neural_semigroup import NeuralSemigroupProblem
-from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
 
 
 def heat_problem(*, dimension=2, radius=1.0, time_scale=1.0):

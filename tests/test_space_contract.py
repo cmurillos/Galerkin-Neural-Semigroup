@@ -2,9 +2,9 @@ import unittest
 
 import numpy as np
 import torch
+from ngfield import MeanZero, Periodic, SimplicialDomain, Space, grad, inner
 
 from galerkin_neural_semigroup import NeuralSemigroupProblem
-from ngfield import MeanZero, Periodic, SimplicialDomain, Space, grad, inner
 
 
 class SpaceCompatibilityTests(unittest.TestCase):

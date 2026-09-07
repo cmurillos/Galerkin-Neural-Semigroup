@@ -1,9 +1,9 @@
 import unittest
 
 import numpy as np
+from ngfield import GalerkinProblem
 
 from galerkin_neural_semigroup import NeuralSemigroupProblem
-from ngfield import GalerkinProblem
 
 from ._fixtures import heat_problem
 
