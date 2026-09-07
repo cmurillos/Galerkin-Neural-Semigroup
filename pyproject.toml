@@ -40,6 +40,9 @@ Homepage = "https://github.com/cmurillos/Galerkin-Neural-Semigroup"
 Source = "https://github.com/cmurillos/Galerkin-Neural-Semigroup"
 Issues = "https://github.com/cmurillos/Galerkin-Neural-Semigroup/issues"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/galerkin_neural_semigroup"]
 
