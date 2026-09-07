@@ -40,9 +40,9 @@ def _mean_loss(field, states, targets, batch_size):
     total = 0.0
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
-            residual = field(states[start : start + batch_size]) - targets[
-                start : start + batch_size
-            ]
+            residual = (
+                field(states[start : start + batch_size]) - targets[start : start + batch_size]
+            )
             total += float(residual.square().sum(dim=-1).sum().item())
     return total / len(states)
 
@@ -299,9 +299,7 @@ class NeuralSemigroupProblem:
             raise ValueError("The checkpoint and problem basis dimensions differ.")
         if not isclose(float(checkpoint.get("radius")), self.radius, rel_tol=0, abs_tol=0):
             raise ValueError("The checkpoint and problem use different training radii.")
-        if not isclose(
-            float(checkpoint.get("time_scale")), self.time_scale, rel_tol=0, abs_tol=0
-        ):
+        if not isclose(float(checkpoint.get("time_scale")), self.time_scale, rel_tol=0, abs_tol=0):
             raise ValueError("The checkpoint and problem use different time scales.")
         if checkpoint.get("metadata", {}).get("basis") != _basis_signature(self.basis):
             raise ValueError("The checkpoint basis signature does not match this problem.")

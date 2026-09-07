@@ -90,9 +90,7 @@ times = torch.linspace(0, 0.2, 21, dtype=semigroup.dtype, device=semigroup.devic
 Z = semigroup.solve(z0, times)  # adaptive Dormand--Prince 5(4)
 Z_rk4 = semigroup.solve(z0, times, step=1e-3)
 
-points = torch.linspace(
-    0, 1, 101, dtype=semigroup.dtype, device=semigroup.device
-).reshape(-1, 1)
+points = torch.linspace(0, 1, 101, dtype=semigroup.dtype, device=semigroup.device).reshape(-1, 1)
 U = semigroup.reconstruct(Z, points)
 ```
 

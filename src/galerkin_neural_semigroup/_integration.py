@@ -39,33 +39,18 @@ def _rk45_step(field, state, step):
     )
     k5 = _checked_field(
         field,
-        state
-        + step
-        * (
-            19372 * k1 / 6561
-            - 25360 * k2 / 2187
-            + 64448 * k3 / 6561
-            - 212 * k4 / 729
-        ),
+        state + step * (19372 * k1 / 6561 - 25360 * k2 / 2187 + 64448 * k3 / 6561 - 212 * k4 / 729),
     )
     k6 = _checked_field(
         field,
         state
         + step
         * (
-            9017 * k1 / 3168
-            - 355 * k2 / 33
-            + 46732 * k3 / 5247
-            + 49 * k4 / 176
-            - 5103 * k5 / 18656
+            9017 * k1 / 3168 - 355 * k2 / 33 + 46732 * k3 / 5247 + 49 * k4 / 176 - 5103 * k5 / 18656
         ),
     )
     fifth = state + step * (
-        35 * k1 / 384
-        + 500 * k3 / 1113
-        + 125 * k4 / 192
-        - 2187 * k5 / 6784
-        + 11 * k6 / 84
+        35 * k1 / 384 + 500 * k3 / 1113 + 125 * k4 / 192 - 2187 * k5 / 6784 + 11 * k6 / 84
     )
     k7 = _checked_field(field, fifth)
     fourth = state + step * (
@@ -159,9 +144,7 @@ def solve(field, state, times, *, step=None, tolerance=None):
     for start, stop in zip(host_times[:-1], host_times[1:]):
         budget = _MAX_INTERNAL_STEPS - used_steps
         if fixed_step is None:
-            state, count = _adaptive_interval(
-                field, state, start, stop, adaptive_tolerance, budget
-            )
+            state, count = _adaptive_interval(field, state, start, stop, adaptive_tolerance, budget)
         else:
             state, count = _fixed_interval(field, state, start, stop, fixed_step, budget)
         used_steps += count

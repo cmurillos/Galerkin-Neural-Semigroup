@@ -80,9 +80,7 @@ class NeuralSemigroup:
         if not isinstance(times, torch.Tensor):
             times = torch.as_tensor(times, device=self.device, dtype=self.dtype)
         scaled_times = times / self.time_scale
-        scaled_step = (
-            None if step is None else positive_real(step, "step") / self.time_scale
-        )
+        scaled_step = None if step is None else positive_real(step, "step") / self.time_scale
         return integrate(
             self.field,
             z0,
