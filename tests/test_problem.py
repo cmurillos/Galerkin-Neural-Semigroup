@@ -56,6 +56,19 @@ class ProblemContractTests(unittest.TestCase):
                 radius=1,
                 time_scale=-1,
             )
+        training = {
+            "hidden": (),
+            "lipschitz": 2.0,
+            "samples": 2,
+            "batch_size": 2,
+            "epochs": 1,
+            "lr": 1e-2,
+            "device": "cpu",
+        }
+        with self.assertRaisesRegex(ValueError, "angular_weight"):
+            valid.train(**training, angular_weight=-0.1)
+        with self.assertRaisesRegex(ValueError, "loss_epsilon"):
+            valid.train(**training, loss_epsilon=0)
 
 
 if __name__ == "__main__":

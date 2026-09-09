@@ -33,8 +33,23 @@ class TrainingTests(unittest.TestCase):
             2.0 * (1 + 1e-12),
         )
         self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
+        self.assertEqual(semigroup.metadata["training"]["angular_weight"], 0.1)
+        self.assertEqual(semigroup.metadata["training"]["loss_epsilon"], 1e-8)
         self.assertIn("quadrature_order", semigroup.metadata["reference"])
         self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
+        self.assertEqual(
+            semigroup.metadata["method"]["loss"],
+            "relative-plus-angular-field-error",
+        )
+        self.assertIn("training_relative_loss", semigroup.history)
+        self.assertIn("validation_angular_loss", semigroup.history)
+        self.assertTrue(semigroup.metrics["validation_relative_loss"] >= 0)
+        self.assertGreaterEqual(semigroup.metrics["validation_angular_loss"], 0)
+        self.assertAlmostEqual(
+            semigroup.metrics["validation_loss"],
+            semigroup.metrics["validation_relative_loss"]
+            + 0.1 * semigroup.metrics["validation_angular_loss"],
+        )
 
     def test_checkpoint_round_trip_uses_same_problem(self):
         problem = heat_problem()

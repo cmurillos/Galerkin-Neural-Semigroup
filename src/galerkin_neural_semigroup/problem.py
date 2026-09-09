@@ -5,12 +5,14 @@ from pathlib import Path
 
 import torch
 
+from ._loss import field_loss_terms
 from ._network import _SpectralMLP
 from ._sampling import reference_targets, uniform_ball
 from ._validation import (
     compute_device,
     floating_dtype,
     hidden_widths,
+    nonnegative_real,
     positive_integer,
     positive_real,
 )
@@ -36,15 +38,21 @@ def _generator(device, seed):
     return result
 
 
-def _mean_loss(field, states, targets, batch_size):
-    total = 0.0
+def _mean_losses(field, states, targets, batch_size, *, angular_weight, epsilon):
+    totals = {"loss": 0.0, "relative_loss": 0.0, "angular_loss": 0.0}
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
-            residual = (
-                field(states[start : start + batch_size]) - targets[start : start + batch_size]
+            target = targets[start : start + batch_size]
+            prediction = field(states[start : start + batch_size])
+            relative, angular = field_loss_terms(
+                prediction,
+                target,
+                epsilon=epsilon,
             )
-            total += float(residual.square().sum(dim=-1).sum().item())
-    return total / len(states)
+            totals["relative_loss"] += float(relative.sum().item())
+            totals["angular_loss"] += float(angular.sum().item())
+            totals["loss"] += float((relative + angular_weight * angular).sum().item())
+    return {name: value / len(states) for name, value in totals.items()}
 
 
 class NeuralSemigroupProblem:
@@ -53,7 +61,8 @@ class NeuralSemigroupProblem:
     The normal route receives an operational ``ngfield`` basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
     restrictions are already carried by the basis. The normalized volume measure,
-    tanh MLP, field loss and exact spectral projection are fixed by the method.
+    tanh MLP, relative-angular field loss and exact spectral projection are fixed by
+    the method.
     """
 
     def __init__(
@@ -125,6 +134,8 @@ class NeuralSemigroupProblem:
         batch_size=256,
         epochs=1_000,
         lr=1e-3,
+        angular_weight=0.1,
+        loss_epsilon=1e-8,
         seed=0,
         device="auto",
         dtype=None,
@@ -137,6 +148,8 @@ class NeuralSemigroupProblem:
         batch_size = min(positive_integer(batch_size, "batch_size"), samples)
         epochs = positive_integer(epochs, "epochs")
         lr = positive_real(lr, "lr")
+        angular_weight = nonnegative_real(angular_weight, "angular_weight")
+        loss_epsilon = positive_real(loss_epsilon, "loss_epsilon")
         seed = positive_integer(seed, "seed", minimum=0)
         if not isinstance(verbose, bool):
             raise TypeError("verbose must be a boolean.")
@@ -191,6 +204,10 @@ class NeuralSemigroupProblem:
         optimizer = torch.optim.Adam(field.parameters(), lr=lr)
         training_losses = []
         validation_losses = []
+        training_relative_losses = []
+        validation_relative_losses = []
+        training_angular_losses = []
+        validation_angular_losses = []
         best_loss = float("inf")
         best_epoch = 0
         best_state = None
@@ -199,29 +216,44 @@ class NeuralSemigroupProblem:
         for epoch in range(epochs):
             field.train()
             order = torch.randperm(samples, generator=generator, device=device)
-            epoch_loss = 0.0
+            epoch_totals = {"loss": 0.0, "relative_loss": 0.0, "angular_loss": 0.0}
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
-                residual = field(train_states[indices]) - train_targets[indices]
-                loss = residual.square().sum(dim=-1).mean()
+                prediction = field(train_states[indices])
+                target = train_targets[indices]
+                relative, angular = field_loss_terms(
+                    prediction,
+                    target,
+                    epsilon=loss_epsilon,
+                )
+                loss = (relative + angular_weight * angular).mean()
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Training produced a nonfinite loss.")
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.detach().item()) * len(indices)
-            epoch_loss /= samples
+                count = len(indices)
+                epoch_totals["loss"] += float(loss.detach().item()) * count
+                epoch_totals["relative_loss"] += float(relative.detach().sum().item())
+                epoch_totals["angular_loss"] += float(angular.detach().sum().item())
+            epoch_metrics = {name: value / samples for name, value in epoch_totals.items()}
             field.eval()
-            validation_loss = _mean_loss(
+            validation_metrics = _mean_losses(
                 field,
                 validation_states,
                 validation_targets,
                 batch_size,
+                angular_weight=angular_weight,
+                epsilon=loss_epsilon,
             )
-            training_losses.append(epoch_loss)
-            validation_losses.append(validation_loss)
-            if validation_loss < best_loss:
-                best_loss = validation_loss
+            training_losses.append(epoch_metrics["loss"])
+            validation_losses.append(validation_metrics["loss"])
+            training_relative_losses.append(epoch_metrics["relative_loss"])
+            validation_relative_losses.append(validation_metrics["relative_loss"])
+            training_angular_losses.append(epoch_metrics["angular_loss"])
+            validation_angular_losses.append(validation_metrics["angular_loss"])
+            if validation_metrics["loss"] < best_loss:
+                best_loss = validation_metrics["loss"]
                 best_epoch = epoch
                 best_state = {
                     name: value.detach().clone() for name, value in field.state_dict().items()
@@ -229,21 +261,45 @@ class NeuralSemigroupProblem:
             if verbose and ((epoch + 1) % report_every == 0 or epoch == 0):
                 print(
                     f"epoch={epoch + 1}/{epochs} "
-                    f"train={epoch_loss:.6e} validation={validation_loss:.6e}"
+                    f"train={epoch_metrics['loss']:.6e} "
+                    f"validation={validation_metrics['loss']:.6e}"
                 )
 
         field.load_state_dict(best_state)
         field.eval()
-        final_training_loss = _mean_loss(field, train_states, train_targets, batch_size)
+        final_training = _mean_losses(
+            field,
+            train_states,
+            train_targets,
+            batch_size,
+            angular_weight=angular_weight,
+            epsilon=loss_epsilon,
+        )
+        final_validation = _mean_losses(
+            field,
+            validation_states,
+            validation_targets,
+            batch_size,
+            angular_weight=angular_weight,
+            epsilon=loss_epsilon,
+        )
         norms = field.spectral_norms()
         history = {
             "training_loss": training_losses,
             "validation_loss": validation_losses,
+            "training_relative_loss": training_relative_losses,
+            "validation_relative_loss": validation_relative_losses,
+            "training_angular_loss": training_angular_losses,
+            "validation_angular_loss": validation_angular_losses,
         }
         metrics = {
             "best_epoch": best_epoch + 1,
-            "training_loss": final_training_loss,
-            "validation_loss": best_loss,
+            "training_loss": final_training["loss"],
+            "validation_loss": final_validation["loss"],
+            "training_relative_loss": final_training["relative_loss"],
+            "validation_relative_loss": final_validation["relative_loss"],
+            "training_angular_loss": final_training["angular_loss"],
+            "validation_angular_loss": final_validation["angular_loss"],
             "effective_lipschitz_bound": field.effective_lipschitz_bound(),
             "layer_spectral_norms": norms,
         }
@@ -261,7 +317,7 @@ class NeuralSemigroupProblem:
                 "measure": "normalized-volume-ball",
                 "activation": "tanh",
                 "spectral_projection": "exact",
-                "loss": "mean-squared-euclidean-field-error",
+                "loss": "relative-plus-angular-field-error",
                 "autonomous": True,
             },
             "training": {
@@ -270,6 +326,8 @@ class NeuralSemigroupProblem:
                 "batch_size": batch_size,
                 "epochs": epochs,
                 "lr": lr,
+                "angular_weight": angular_weight,
+                "loss_epsilon": loss_epsilon,
                 "seed": seed,
                 "optimizer": "Adam",
                 "target_mode": "cached",

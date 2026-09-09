@@ -11,8 +11,8 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 The network is a `tanh` multilayer perceptron with exact spectral projection. If its
 global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
 continuous flow satisfies identity and composition by construction. Training compares
-velocities on a normalized-volume sample of the reduced ball; it does not generate
-reference trajectories.
+the relative magnitude and direction of velocities on a normalized-volume sample of
+the reduced ball; it does not generate reference trajectories.
 
 This repository is early research software. The mathematical and numerical contracts
 are explicit, but empirical claims will be added only after dedicated experiments.
@@ -72,14 +72,18 @@ semigroup = problem.train(
     batch_size=256,
     epochs=1_000,
     lr=1e-3,
+    angular_weight=0.1,
+    loss_epsilon=1e-8,
     seed=0,
 )
 ```
 
 `basis.dimension` determines both the input and output dimensions. The normalized
 volume measure on the ball, `tanh` activation, autonomous architecture, spectral
-projection, squared field loss and Adam optimizer are method decisions rather than
-user-facing objects.
+projection and Adam optimizer are method decisions rather than user-facing objects.
+The loss combines a regularized relative field error with a cosine-direction penalty;
+`angular_weight` controls the latter and `loss_epsilon` regularizes both terms near
+stationary states. Both values are stored in the training metadata.
 
 ## Evolution and reconstruction
 

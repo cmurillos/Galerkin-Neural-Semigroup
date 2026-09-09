@@ -29,6 +29,8 @@ def main():
         batch_size=256,
         epochs=500,
         lr=1e-3,
+        angular_weight=0.1,
+        loss_epsilon=1e-8,
         seed=0,
         verbose=True,
     )

@@ -30,7 +30,7 @@ an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
 The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
 `GalerkinProblem` workflows. Neither route returns the numerical reference field.
 
-## D-002 — Fixed learning measure and objective
+## D-002 — Fixed learning measure and relative-angular objective
 
 Training states are independent samples from normalized Lebesgue volume on
 
@@ -44,10 +44,28 @@ For a standard Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementatio
 z = R0 * s^(1/N) * xi / ||xi||_2.
 ```
 
-The empirical loss is the batch mean of the squared Euclidean field error, equivalently
-`||F(Z)-Y||_F^2 / B`. It sums rather than averages over the coordinate dimension. Targets
-are evaluated in batches, detached from autograd and cached. Validation uses an
-independent sample.
+Let `Y = tau * G(Z)` be the cached scaled Galerkin target, let `lambda_ang >= 0` and let
+`epsilon > 0`. For each sampled state the two loss components are
+
+```text
+L_rel = ||F(Z)-Y||_2^2 / (||Y||_2^2 + epsilon),
+
+L_ang = 1 - <F(Z),Y>
+              / sqrt((||F(Z)||_2^2 + epsilon)(||Y||_2^2 + epsilon)).
+```
+
+The empirical objective is the batch mean of
+
+```text
+L = L_rel + lambda_ang * L_ang.
+```
+
+The relative term prevents large target velocities from determining the entire fit,
+while the angular term explicitly distinguishes aligned, orthogonal and opposing vector
+fields. `epsilon` keeps both terms finite near stationary states. Cosine values are
+clamped to `[-1,1]` only to remove floating-point excursions; this does not change the
+formula in exact arithmetic. Targets are evaluated in batches, detached from autograd
+and cached. Validation uses an independent sample and the same loss parameters.
 
 ## D-003 — Fixed neural architecture
 
@@ -98,18 +116,21 @@ problem.train(
     batch_size=...,
     epochs=...,
     lr=...,
+    angular_weight=0.1,
+    loss_epsilon=1e-8,
     seed=...,
 )
 ```
 
-Adam, the field loss, validation sampling and cached targets are currently fixed. Device
-selection defaults to CUDA when available and otherwise CPU. Computation uses float64 by
-default; `device` and `dtype` are explicit advanced overrides because they affect
-reproducibility.
+Adam, the form of the relative-angular loss, validation sampling and cached targets are
+currently fixed. `angular_weight` is nonnegative and `loss_epsilon` is strictly positive.
+Device selection defaults to CUDA when available and otherwise CPU. Computation uses
+float64 by default; `device` and `dtype` are explicit advanced overrides because they
+affect reproducibility.
 
 The returned weights are those with minimum independent validation loss. All epochs are
-retained in `semigroup.history`; final metrics include the layer spectral norms and their
-product.
+retained in `semigroup.history`. Total, relative and angular histories and final metrics
+are reported separately, together with the layer spectral norms and their product.
 
 ## D-006 — Flow and numerical integration
 
