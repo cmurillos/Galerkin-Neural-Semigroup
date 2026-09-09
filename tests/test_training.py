@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -91,6 +92,60 @@ class TrainingTests(unittest.TestCase):
             incompatible = heat_problem(radius=2.0)
             with self.assertRaisesRegex(ValueError, "radii"):
                 incompatible.load(path, device="cpu")
+
+    def test_tolerance_stops_only_after_minimum_epochs(self):
+        semigroup = heat_problem().train(
+            hidden=(),
+            lipschitz=2.0,
+            samples=16,
+            batch_size=8,
+            epochs=2,
+            max_epochs=6,
+            tolerance=1e12,
+            candidate_samples=16,
+            patience=1,
+            lr=1e-2,
+            seed=2,
+            device="cpu",
+        )
+
+        self.assertEqual(semigroup.metrics["stop_reason"], "tolerance")
+        self.assertEqual(semigroup.metrics["epochs_completed"], 2)
+        self.assertEqual(len(semigroup.history["candidate_checks"]), 1)
+
+    def test_plateau_with_coverage_gap_adds_adaptive_samples(self):
+        with patch(
+            "galerkin_neural_semigroup.problem._upper_quantile",
+            side_effect=[10.0, 10.0, 1.0, 5.0, 5.0],
+        ):
+            semigroup = heat_problem().train(
+                hidden=(),
+                lipschitz=2.0,
+                samples=16,
+                batch_size=8,
+                epochs=1,
+                max_epochs=3,
+                refine_every=1,
+                refine_samples=4,
+                candidate_samples=16,
+                patience=1,
+                lr=1e-12,
+                seed=3,
+                device="cpu",
+            )
+
+        self.assertEqual(semigroup.metrics["refinements"], 1)
+        self.assertEqual(semigroup.metrics["training_samples"], 20)
+        self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached-and-appended")
+
+    def test_max_epochs_cannot_precede_minimum_epochs(self):
+        with self.assertRaisesRegex(ValueError, "greater than or equal"):
+            heat_problem().train(
+                hidden=(),
+                lipschitz=2.0,
+                epochs=3,
+                max_epochs=2,
+            )
 
 
 if __name__ == "__main__":

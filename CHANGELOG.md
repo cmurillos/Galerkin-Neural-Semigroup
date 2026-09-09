@@ -10,5 +10,9 @@
 - Replace the unnormalized field MSE with a regularized relative error plus a
   configurable angular-alignment term.
 - Report total, relative and angular training and validation losses separately.
+- Add plateau-aware error refinement with radially stratified probes and local
+  error-weighted kernel sampling.
+- Add minimum/maximum epoch budgets, tolerance, wall-clock and stalled-fit stopping
+  criteria with explicit stop metadata.
 - Add adaptive Dormand--Prince 5(4), fixed-step RK4 and composition diagnostics.
 - Add physical projection/reconstruction and checkpoint round trips.

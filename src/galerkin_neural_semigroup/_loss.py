@@ -20,3 +20,11 @@ def field_loss(prediction, target, *, angular_weight, epsilon):
     """Return the batch mean of relative error plus weighted angular error."""
     relative, angular = field_loss_terms(prediction, target, epsilon=epsilon)
     return (relative + angular_weight * angular).mean()
+
+
+def adaptive_field_score(prediction, target, *, angular_weight, epsilon):
+    """Return a per-state refinement score with a stationary-state angular gate."""
+    relative, angular = field_loss_terms(prediction, target, epsilon=epsilon)
+    target_squared = target.square().sum(dim=-1)
+    angular_gate = target_squared / (target_squared + epsilon)
+    return relative + angular_weight * angular_gate * angular

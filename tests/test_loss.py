@@ -2,7 +2,11 @@ import unittest
 
 import torch
 
-from galerkin_neural_semigroup._loss import field_loss, field_loss_terms
+from galerkin_neural_semigroup._loss import (
+    adaptive_field_score,
+    field_loss,
+    field_loss_terms,
+)
 
 
 class FieldLossTests(unittest.TestCase):
@@ -54,6 +58,20 @@ class FieldLossTests(unittest.TestCase):
         loss.backward()
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.isfinite(prediction.grad).all())
+
+    def test_refinement_score_turns_off_undefined_stationary_angle(self):
+        prediction = torch.tensor([[1.0, 0.0]], dtype=torch.float64)
+        target = torch.zeros_like(prediction)
+        epsilon = 1e-3
+
+        score = adaptive_field_score(
+            prediction,
+            target,
+            angular_weight=10.0,
+            epsilon=epsilon,
+        )
+
+        torch.testing.assert_close(score, torch.tensor([1 / epsilon], dtype=torch.float64))
 
 
 if __name__ == "__main__":

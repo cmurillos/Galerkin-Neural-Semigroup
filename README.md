@@ -11,8 +11,9 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 The network is a `tanh` multilayer perceptron with exact spectral projection. If its
 global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
 continuous flow satisfies identity and composition by construction. Training compares
-the relative magnitude and direction of velocities on a normalized-volume sample of
-the reduced ball; it does not generate reference trajectories.
+the relative magnitude and direction of velocities on the reduced ball; it does not
+generate reference trajectories. Optional adaptive refinement adds local samples where
+an independent probe finds a persistent coverage error.
 
 This repository is early research software. The mathematical and numerical contracts
 are explicit, but empirical claims will be added only after dedicated experiments.
@@ -71,6 +72,13 @@ semigroup = problem.train(
     samples=10_000,
     batch_size=256,
     epochs=1_000,
+    max_epochs=5_000,
+    tolerance=1e-3,
+    max_time=900,
+    refine_every=200,
+    refine_samples=512,
+    candidate_samples=32_768,
+    patience=100,
     lr=1e-3,
     angular_weight=0.1,
     loss_epsilon=1e-8,
@@ -78,12 +86,26 @@ semigroup = problem.train(
 )
 ```
 
-`basis.dimension` determines both the input and output dimensions. The normalized
-volume measure on the ball, `tanh` activation, autonomous architecture, spectral
+`basis.dimension` determines both the input and output dimensions. The initial
+normalized-volume sample, `tanh` activation, autonomous architecture, spectral
 projection and Adam optimizer are method decisions rather than user-facing objects.
 The loss combines a regularized relative field error with a cosine-direction penalty;
 `angular_weight` controls the latter and `loss_epsilon` regularizes both terms near
-stationary states. Both values are stored in the training metadata.
+stationary states.
+
+`epochs` is the minimum training budget and `max_epochs` is its hard epoch limit. If
+`max_epochs` is omitted it equals `epochs`, preserving fixed-budget training. Training
+can also stop when the 99th percentile of the independent probe score reaches
+`tolerance`, when `max_time` seconds elapse, or when the fit remains stalled after the
+minimum budget. The best checkpoint is retained and `stop_reason` records the decision.
+
+Setting `refine_every` enables adaptive sampling. Once validation has failed to improve
+for `patience` epochs, a direction-randomized radial probe searches the complete range
+of radii. Refinement occurs only if its 99th-percentile error exceeds the corresponding
+training error by at least 25%. `refine_samples` states are then drawn from an
+error-weighted local kernel mixture with 15% global exploration. Newly appended targets
+remain private and cached. The histories `candidate_checks` and `refinements` record
+every adaptive decision.
 
 ## Evolution and reconstruction
 
