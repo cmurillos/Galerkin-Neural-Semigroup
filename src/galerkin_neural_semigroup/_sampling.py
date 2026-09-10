@@ -65,6 +65,18 @@ def radial_probe(count, dimension, radius, *, generator, device, dtype):
     return states.reshape(-1, dimension)[:count]
 
 
+def jacobian_directions(count, dimension, radius, *, generator, device, dtype):
+    """Return radius-scaled Rademacher probes for Jacobian supervision."""
+    directions = torch.randint(
+        0,
+        2,
+        (count, dimension),
+        generator=generator,
+        device=device,
+    )
+    return radius * (2 * directions.to(dtype=dtype) - 1)
+
+
 def adaptive_refinement(
     candidates,
     scores,
@@ -155,17 +167,29 @@ def adaptive_refinement(
     return local
 
 
-@torch.no_grad()
-def reference_targets(reference, states, *, time_scale, batch_size):
+def reference_targets_and_jvps(
+    reference,
+    states,
+    directions,
+    *,
+    time_scale,
+    batch_size,
+):
+    """Return detached field values and directional derivatives in batches."""
+    if states.shape != directions.shape:
+        raise ValueError("states and Jacobian directions must have the same shape.")
     outputs = []
+    derivatives = []
     for start in range(0, len(states), batch_size):
-        values = reference(states[start : start + batch_size])
-        if values.shape != states[start : start + batch_size].shape:
+        state = states[start : start + batch_size]
+        direction = directions[start : start + batch_size]
+        values, jvp = torch.func.jvp(reference, (state,), (direction,))
+        if values.shape != state.shape or jvp.shape != state.shape:
             raise ValueError("The internal reference evaluator changed the state shape.")
-        if not torch.isfinite(values).all():
-            raise FloatingPointError("The internal reference evaluator returned nonfinite values.")
         target = time_scale * values
-        if not torch.isfinite(target).all():
-            raise FloatingPointError("Time scaling produced nonfinite reference targets.")
+        target_jvp = time_scale * jvp
+        if not torch.isfinite(target).all() or not torch.isfinite(target_jvp).all():
+            raise FloatingPointError("The internal reference evaluator returned nonfinite data.")
         outputs.append(target.detach())
-    return torch.cat(outputs, dim=0)
+        derivatives.append(target_jvp.detach())
+    return torch.cat(outputs, dim=0), torch.cat(derivatives, dim=0)

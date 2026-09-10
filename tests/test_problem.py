@@ -65,10 +65,10 @@ class ProblemContractTests(unittest.TestCase):
             "lr": 1e-2,
             "device": "cpu",
         }
-        with self.assertRaisesRegex(ValueError, "angular_weight"):
-            valid.train(**training, angular_weight=-0.1)
-        with self.assertRaisesRegex(ValueError, "loss_epsilon"):
-            valid.train(**training, loss_epsilon=0)
+        with self.assertRaisesRegex(ValueError, "jacobian_weight"):
+            valid.train(**training, jacobian_weight=-0.1)
+        with self.assertRaisesRegex(ValueError, "balance_epsilon"):
+            valid.train(**training, balance_epsilon=0)
 
 
 if __name__ == "__main__":

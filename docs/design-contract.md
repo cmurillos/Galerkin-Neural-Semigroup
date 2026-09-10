@@ -30,7 +30,7 @@ an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
 The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
 `GalerkinProblem` workflows. Neither route returns the numerical reference field.
 
-## D-002 — Initial measure and relative-angular objective
+## D-002 — Initial measure and component-balanced Sobolev objective
 
 Initial training states are independent samples from normalized Lebesgue volume on
 
@@ -44,40 +44,48 @@ For a standard Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementatio
 z = R0 * s^(1/N) * xi / ||xi||_2.
 ```
 
-Let `Y = tau * G(Z)` be the cached scaled Galerkin target, let `lambda_ang >= 0` and let
-`epsilon > 0`. For each sampled state the two loss components are
+Let `Y = tau * G(Z)` be the cached scaled Galerkin target. Component scales are computed
+once from the initial training design and remain fixed after adaptive refinements:
 
 ```text
-L_rel = ||F(Z)-Y||_2^2 / (||Y||_2^2 + epsilon),
+s_j^2 = mean_i Y_j(Z_i)^2,
 
-L_ang = 1 - <F(Z),Y>
-              / sqrt((||F(Z)||_2^2 + epsilon)(||Y||_2^2 + epsilon)).
+W = diag((s_j^2 + epsilon * mean_k s_k^2)^(-1/2)).
 ```
 
-The empirical objective is the batch mean of
+If the reference field is identically zero, `W` is the identity. Thus `epsilon > 0` is
+a relative floor rather than a dimensional constant, and global changes of target scale
+do not alter the balance between components.
+
+Each state receives one Rademacher vector `xi` whose coordinates are independently
+`-1` or `1`. The stored Jacobian direction is `V = R0 * xi`; multiplication by `R0`
+expresses the derivative in unit-ball coordinates without changing the public state
+coordinates. Numerical Galerkin Field supplies the exact directional derivative
+`J_Y(Z)V = tau * J_G(Z)V` through forward-mode automatic differentiation.
+
+For `lambda_J >= 0`, the per-state terms are
 
 ```text
-L = L_rel + lambda_ang * L_ang.
+L_value = mean_j [W(F(Z)-Y)]_j^2,
+
+L_jacobian = mean_j [W(J_F(Z)V-J_Y(Z)V)]_j^2,
+
+L = L_value + lambda_J * L_jacobian.
 ```
 
-The relative term prevents large target velocities from determining the entire fit,
-while the angular term explicitly distinguishes aligned, orthogonal and opposing vector
-fields. `epsilon` keeps both terms finite near stationary states. Cosine values are
-clamped to `[-1,1]` only to remove floating-point excursions; this does not change the
-formula in exact arithmetic. Targets are evaluated in batches, detached from autograd
-and cached. Validation uses an independent sample and the same loss parameters.
+The inverse-RMS matrix prevents large target components from determining the entire fit.
+The JVP term supervises the first-order variation of the field without materializing a
+full Jacobian at every state. Values and JVP targets are evaluated in batches, detached
+from autograd and cached. Validation uses independent states and directions with the same
+fixed component weights.
 
 Adaptive refinement, when requested, does not replace this objective. It changes the
 empirical design by appending states in regions where the current field has a persistent
-coverage error. Its selection score gates only the angular contribution near stationary
-targets:
+coverage error. Its selection score is the same per-state Sobolev loss:
 
 ```text
-eta(z) = L_rel(z)
-       + lambda_ang * ||Y||^2/(||Y||^2 + epsilon) * L_ang(z).
+eta(z) = L_value(z) + lambda_J * L_jacobian(z).
 ```
-
-The gate is a sampling decision and does not alter the training loss.
 
 ## D-003 — Fixed neural architecture
 
@@ -135,17 +143,17 @@ problem.train(
     candidate_samples=32768,
     patience=100,
     lr=...,
-    angular_weight=0.1,
-    loss_epsilon=1e-8,
+    jacobian_weight=0.1,
+    balance_epsilon=1e-6,
     seed=...,
 )
 ```
 
-Adam, the form of the relative-angular loss, validation sampling and cached targets are
-currently fixed. `angular_weight` is nonnegative and `loss_epsilon` is strictly positive.
-Device selection defaults to CUDA when available and otherwise CPU. Computation uses
-float64 by default; `device` and `dtype` are explicit advanced overrides because they
-affect reproducibility.
+Adam, one radius-scaled Rademacher direction per state, validation sampling and cached
+targets are currently fixed. `jacobian_weight` is nonnegative and `balance_epsilon` is
+strictly positive. Device selection defaults to CUDA when available and otherwise CPU.
+Computation uses float64 by default; `device` and `dtype` are explicit advanced overrides
+because they affect reproducibility.
 
 `epochs` is the minimum budget whenever `max_epochs` is larger; omitting `max_epochs`
 recovers the previous exact epoch budget. `max_time` is a hard wall-clock budget in
@@ -176,9 +184,9 @@ adaptation window, half of each epoch design is drawn from the newly appended st
 Without an independent probe, the returned weights minimize validation loss. With
 tolerance or adaptive refinement enabled, they minimize the probe's 99th-percentile
 score in the latest adaptive stage. All epochs are retained in `semigroup.history`.
-Total, relative and angular histories, candidate checks and refinement events are
-reported separately, together with the stop reason, elapsed time, final sample count,
-layer spectral norms and their product.
+Total, value and Jacobian histories, candidate checks and refinement events are reported
+separately, together with the stop reason, elapsed time, final sample count, component
+scales, layer spectral norms and their product.
 
 ## D-006 — Flow and numerical integration
 

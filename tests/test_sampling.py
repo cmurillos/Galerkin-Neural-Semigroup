@@ -4,12 +4,43 @@ import torch
 
 from galerkin_neural_semigroup._sampling import (
     adaptive_refinement,
+    jacobian_directions,
     radial_probe,
+    reference_targets_and_jvps,
     uniform_ball,
 )
 
 
 class UniformBallTests(unittest.TestCase):
+    def test_jacobian_directions_are_radius_scaled_rademacher_vectors(self):
+        directions = jacobian_directions(
+            100,
+            4,
+            2.5,
+            generator=torch.Generator().manual_seed(1),
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+
+        self.assertEqual(directions.shape, (100, 4))
+        torch.testing.assert_close(directions.abs(), torch.full_like(directions, 2.5))
+
+    def test_reference_values_and_jvps_are_scaled_and_detached(self):
+        states = torch.tensor([[1.0, 2.0], [-1.0, 3.0]], dtype=torch.float64)
+        directions = torch.tensor([[2.0, -1.0], [1.0, 2.0]], dtype=torch.float64)
+        targets, target_jvps = reference_targets_and_jvps(
+            lambda z: z.square(),
+            states,
+            directions,
+            time_scale=0.5,
+            batch_size=1,
+        )
+
+        torch.testing.assert_close(targets, 0.5 * states.square())
+        torch.testing.assert_close(target_jvps, states * directions)
+        self.assertFalse(targets.requires_grad)
+        self.assertFalse(target_jvps.requires_grad)
+
     def test_support_and_radial_distribution(self):
         dimension = 5
         radius = 2.0

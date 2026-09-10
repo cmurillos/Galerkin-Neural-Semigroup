@@ -7,9 +7,9 @@
 - Add a fixed autonomous `tanh` MLP with exact spectral projection.
 - Expose a global Lipschitz budget independent of network depth.
 - Train on normalized-volume samples of the reduced ball without trajectories.
-- Replace the unnormalized field MSE with a regularized relative error plus a
-  configurable angular-alignment term.
-- Report total, relative and angular training and validation losses separately.
+- Replace relative-angular supervision with fixed component balancing and a
+  configurable Jacobian-vector-product term.
+- Report total, value and Jacobian training and validation losses separately.
 - Add plateau-aware error refinement with radially stratified probes and local
   error-weighted kernel sampling.
 - Add minimum/maximum epoch budgets, tolerance, wall-clock and stalled-fit stopping

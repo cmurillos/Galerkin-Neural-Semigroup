@@ -1,30 +1,67 @@
-"""Relative and angular supervision for reduced vector fields."""
+"""Component-balanced Sobolev supervision for reduced vector fields."""
 
 import torch
 
 
-def field_loss_terms(prediction, target, *, epsilon):
-    """Return the per-state relative and stabilized angular errors."""
-    residual_squared = (prediction - target).square().sum(dim=-1)
-    prediction_squared = prediction.square().sum(dim=-1)
-    target_squared = target.square().sum(dim=-1)
-    relative = residual_squared / (target_squared + epsilon)
-    cosine = (prediction * target).sum(dim=-1) / torch.sqrt(
-        (prediction_squared + epsilon) * (target_squared + epsilon)
+def component_weights(targets, *, epsilon):
+    """Return fixed inverse-RMS weights with a relative component floor."""
+    if targets.ndim != 2:
+        raise ValueError("targets must have shape [samples,dimension].")
+    component_energy = targets.square().mean(dim=0)
+    mean_energy = component_energy.mean()
+    if float(mean_energy.item()) == 0.0:
+        return torch.ones_like(component_energy)
+    return torch.rsqrt(component_energy + epsilon * mean_energy)
+
+
+def field_loss_terms(prediction, target, prediction_jvp, target_jvp, *, weights):
+    """Return per-state component-balanced value and Jacobian errors."""
+    if prediction.shape != target.shape:
+        raise ValueError("prediction and target must have the same shape.")
+    if prediction_jvp.shape != target_jvp.shape or prediction_jvp.shape != target.shape:
+        raise ValueError("Jacobian-vector products and targets must have the same shape.")
+    if weights.shape != target.shape[-1:]:
+        raise ValueError("weights must contain one value per field component.")
+    value = ((prediction - target) * weights).square().mean(dim=-1)
+    jacobian = ((prediction_jvp - target_jvp) * weights).square().mean(dim=-1)
+    return value, jacobian
+
+
+def field_loss(
+    prediction,
+    target,
+    prediction_jvp,
+    target_jvp,
+    *,
+    weights,
+    jacobian_weight,
+):
+    """Return the balanced value loss plus weighted JVP loss."""
+    value, jacobian = field_loss_terms(
+        prediction,
+        target,
+        prediction_jvp,
+        target_jvp,
+        weights=weights,
     )
-    angular = 1 - cosine.clamp(-1, 1)
-    return relative, angular
+    return (value + jacobian_weight * jacobian).mean()
 
 
-def field_loss(prediction, target, *, angular_weight, epsilon):
-    """Return the batch mean of relative error plus weighted angular error."""
-    relative, angular = field_loss_terms(prediction, target, epsilon=epsilon)
-    return (relative + angular_weight * angular).mean()
-
-
-def adaptive_field_score(prediction, target, *, angular_weight, epsilon):
-    """Return a per-state refinement score with a stationary-state angular gate."""
-    relative, angular = field_loss_terms(prediction, target, epsilon=epsilon)
-    target_squared = target.square().sum(dim=-1)
-    angular_gate = target_squared / (target_squared + epsilon)
-    return relative + angular_weight * angular_gate * angular
+def adaptive_field_score(
+    prediction,
+    target,
+    prediction_jvp,
+    target_jvp,
+    *,
+    weights,
+    jacobian_weight,
+):
+    """Return the per-state balanced Sobolev score used by refinement."""
+    value, jacobian = field_loss_terms(
+        prediction,
+        target,
+        prediction_jvp,
+        target_jvp,
+        weights=weights,
+    )
+    return value + jacobian_weight * jacobian
