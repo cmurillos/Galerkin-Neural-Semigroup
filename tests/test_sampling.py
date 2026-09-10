@@ -4,42 +4,52 @@ import torch
 
 from galerkin_neural_semigroup._sampling import (
     adaptive_refinement,
-    jacobian_directions,
+    canonical_directions,
     radial_probe,
-    reference_targets_and_jvps,
+    reference_targets,
+    reference_targets_and_jacobians,
     uniform_ball,
 )
 
 
 class UniformBallTests(unittest.TestCase):
-    def test_jacobian_directions_are_radius_scaled_rademacher_vectors(self):
-        directions = jacobian_directions(
-            100,
+    def test_jacobian_directions_are_the_complete_scaled_canonical_basis(self):
+        directions = canonical_directions(
             4,
             2.5,
-            generator=torch.Generator().manual_seed(1),
             device=torch.device("cpu"),
             dtype=torch.float64,
         )
 
-        self.assertEqual(directions.shape, (100, 4))
-        torch.testing.assert_close(directions.abs(), torch.full_like(directions, 2.5))
+        torch.testing.assert_close(directions, 2.5 * torch.eye(4, dtype=torch.float64))
 
-    def test_reference_values_and_jvps_are_scaled_and_detached(self):
+    def test_reference_values_and_full_jacobians_are_scaled_and_detached(self):
         states = torch.tensor([[1.0, 2.0], [-1.0, 3.0]], dtype=torch.float64)
-        directions = torch.tensor([[2.0, -1.0], [1.0, 2.0]], dtype=torch.float64)
-        targets, target_jvps = reference_targets_and_jvps(
+        matrix = torch.tensor([[1.0, 2.0], [-3.0, 4.0]], dtype=torch.float64)
+        targets, target_jacobians = reference_targets_and_jacobians(
+            lambda z: z @ matrix.T,
+            states,
+            radius=2.0,
+            time_scale=0.5,
+            batch_size=1,
+        )
+
+        torch.testing.assert_close(targets, 0.5 * states @ matrix.T)
+        torch.testing.assert_close(target_jacobians, matrix.expand(len(states), -1, -1))
+        self.assertFalse(targets.requires_grad)
+        self.assertFalse(target_jacobians.requires_grad)
+
+    def test_reference_values_can_be_prepared_without_jacobians(self):
+        states = torch.tensor([[1.0, 2.0], [-1.0, 3.0]], dtype=torch.float64)
+        targets = reference_targets(
             lambda z: z.square(),
             states,
-            directions,
             time_scale=0.5,
             batch_size=1,
         )
 
         torch.testing.assert_close(targets, 0.5 * states.square())
-        torch.testing.assert_close(target_jvps, states * directions)
         self.assertFalse(targets.requires_grad)
-        self.assertFalse(target_jvps.requires_grad)
 
     def test_support_and_radial_distribution(self):
         dimension = 5

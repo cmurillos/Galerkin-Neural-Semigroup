@@ -10,10 +10,12 @@ from ._loss import adaptive_field_score, component_weights, field_loss_terms
 from ._network import _SpectralMLP
 from ._sampling import (
     adaptive_refinement,
-    jacobian_directions,
+    canonical_directions,
     radial_probe,
-    reference_targets_and_jvps,
+    reference_targets,
+    reference_targets_and_jacobians,
     uniform_ball,
+    values_and_full_jacobian,
 )
 from ._validation import (
     compute_device,
@@ -45,8 +47,8 @@ def _generator(device, seed):
     return result
 
 
-def _field_values_and_jvp(field, states, directions):
-    return torch.func.jvp(field, (states,), (directions,))
+def _field_values_and_jacobian(field, states, directions):
+    return values_and_full_jacobian(field, states, directions)
 
 
 def _mean_losses(
@@ -54,7 +56,7 @@ def _mean_losses(
     states,
     targets,
     directions,
-    target_jvps,
+    target_jacobians,
     batch_size,
     *,
     weights,
@@ -64,16 +66,16 @@ def _mean_losses(
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
             target = targets[start : start + batch_size]
-            prediction, prediction_jvp = _field_values_and_jvp(
+            prediction, prediction_jacobian = _field_values_and_jacobian(
                 field,
                 states[start : start + batch_size],
-                directions[start : start + batch_size],
+                directions,
             )
             value, jacobian = field_loss_terms(
                 prediction,
                 target,
-                prediction_jvp,
-                target_jvps[start : start + batch_size],
+                prediction_jacobian,
+                target_jacobians[start : start + batch_size],
                 weights=weights,
             )
             totals["value_loss"] += float(value.sum().item())
@@ -82,34 +84,34 @@ def _mean_losses(
     return {name: value / len(states) for name, value in totals.items()}
 
 
+def _mean_value_loss(field, states, targets, batch_size, *, weights):
+    total = 0.0
+    with torch.no_grad():
+        for start in range(0, len(states), batch_size):
+            target = targets[start : start + batch_size]
+            prediction = field(states[start : start + batch_size])
+            total += float(adaptive_field_score(prediction, target, weights=weights).sum().item())
+    return total / len(states)
+
+
 def _refinement_scores(
     field,
     states,
     targets,
-    directions,
-    target_jvps,
     batch_size,
     *,
     weights,
-    jacobian_weight,
 ):
     scores = []
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
             target = targets[start : start + batch_size]
-            prediction, prediction_jvp = _field_values_and_jvp(
-                field,
-                states[start : start + batch_size],
-                directions[start : start + batch_size],
-            )
+            prediction = field(states[start : start + batch_size])
             scores.append(
                 adaptive_field_score(
                     prediction,
                     target,
-                    prediction_jvp,
-                    target_jvps[start : start + batch_size],
                     weights=weights,
-                    jacobian_weight=jacobian_weight,
                 )
             )
     return torch.cat(scores)
@@ -286,33 +288,30 @@ class NeuralSemigroupProblem:
             device=device,
             dtype=dtype,
         )
-        train_directions = jacobian_directions(
-            samples,
+        jacobian_basis = canonical_directions(
             self.dimension,
             self.radius,
-            generator=generator,
             device=device,
             dtype=dtype,
         )
-        validation_directions = jacobian_directions(
-            validation_samples,
-            self.dimension,
-            self.radius,
-            generator=generator,
-            device=device,
-            dtype=dtype,
-        )
-        train_targets, train_target_jvps = reference_targets_and_jvps(
+        train_targets, train_target_jacobians = reference_targets_and_jacobians(
             coordinate_system,
             train_states,
-            train_directions,
+            radius=self.radius,
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
-        validation_targets, validation_target_jvps = reference_targets_and_jvps(
+        validation_targets = reference_targets(
             coordinate_system,
             validation_states,
-            validation_directions,
+            time_scale=self.time_scale,
+            batch_size=batch_size,
+        )
+        jacobian_audit_samples = min(64, validation_samples)
+        _, validation_target_jacobians = reference_targets_and_jacobians(
+            coordinate_system,
+            validation_states[:jacobian_audit_samples],
+            radius=self.radius,
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
@@ -320,8 +319,6 @@ class NeuralSemigroupProblem:
         weights = component_weights(train_targets, epsilon=balance_epsilon)
         candidates = None
         candidate_targets = None
-        candidate_directions = None
-        candidate_target_jvps = None
         if refine_every is not None or tolerance is not None:
             candidates = radial_probe(
                 candidate_samples,
@@ -331,18 +328,9 @@ class NeuralSemigroupProblem:
                 device=device,
                 dtype=dtype,
             )
-            candidate_directions = jacobian_directions(
-                candidate_samples,
-                self.dimension,
-                self.radius,
-                generator=generator,
-                device=device,
-                dtype=dtype,
-            )
-            candidate_targets, candidate_target_jvps = reference_targets_and_jvps(
+            candidate_targets = reference_targets(
                 coordinate_system,
                 candidates,
-                candidate_directions,
                 time_scale=self.time_scale,
                 batch_size=batch_size,
             )
@@ -361,6 +349,7 @@ class NeuralSemigroupProblem:
         validation_value_losses = []
         training_jacobian_losses = []
         validation_jacobian_losses = []
+        validation_jacobian_audits = []
         candidate_checks = []
         refinement_events = []
         best_loss = float("inf")
@@ -390,17 +379,17 @@ class NeuralSemigroupProblem:
             epoch_totals = {"loss": 0.0, "value_loss": 0.0, "jacobian_loss": 0.0}
             for start in range(0, training_count, batch_size):
                 indices = order[start : start + batch_size]
-                prediction, prediction_jvp = _field_values_and_jvp(
+                prediction, prediction_jacobian = _field_values_and_jacobian(
                     field,
                     train_states[indices],
-                    train_directions[indices],
+                    jacobian_basis,
                 )
                 target = train_targets[indices]
                 value, jacobian = field_loss_terms(
                     prediction,
                     target,
-                    prediction_jvp,
-                    train_target_jvps[indices],
+                    prediction_jacobian,
+                    train_target_jacobians[indices],
                     weights=weights,
                 )
                 loss = (value + jacobian_weight * jacobian).mean()
@@ -415,31 +404,45 @@ class NeuralSemigroupProblem:
                 epoch_totals["jacobian_loss"] += float(jacobian.detach().sum().item())
             epoch_metrics = {name: value / training_count for name, value in epoch_totals.items()}
             field.eval()
-            validation_metrics = _mean_losses(
+            validation_value = _mean_value_loss(
                 field,
                 validation_states,
                 validation_targets,
-                validation_directions,
-                validation_target_jvps,
                 batch_size,
                 weights=weights,
-                jacobian_weight=jacobian_weight,
             )
-            training_losses.append(epoch_metrics["loss"])
-            validation_losses.append(validation_metrics["loss"])
-            training_value_losses.append(epoch_metrics["value_loss"])
-            validation_value_losses.append(validation_metrics["value_loss"])
-            training_jacobian_losses.append(epoch_metrics["jacobian_loss"])
-            validation_jacobian_losses.append(validation_metrics["jacobian_loss"])
             completed_epochs = epoch + 1
-            if best_candidate_q99 is None and validation_metrics["loss"] < best_loss:
-                best_loss = validation_metrics["loss"]
+            validation_jacobian = None
+            audit_due = completed_epochs == 1 or completed_epochs % report_every == 0
+            if audit_due:
+                audit = _mean_losses(
+                    field,
+                    validation_states[:jacobian_audit_samples],
+                    validation_targets[:jacobian_audit_samples],
+                    jacobian_basis,
+                    validation_target_jacobians,
+                    batch_size,
+                    weights=weights,
+                    jacobian_weight=jacobian_weight,
+                )
+                validation_jacobian = audit["jacobian_loss"]
+                validation_jacobian_audits.append(
+                    {"epoch": completed_epochs, "jacobian_loss": validation_jacobian}
+                )
+            training_losses.append(epoch_metrics["loss"])
+            validation_losses.append(validation_value)
+            training_value_losses.append(epoch_metrics["value_loss"])
+            validation_value_losses.append(validation_value)
+            training_jacobian_losses.append(epoch_metrics["jacobian_loss"])
+            validation_jacobian_losses.append(validation_jacobian)
+            if best_candidate_q99 is None and validation_value < best_loss:
+                best_loss = validation_value
                 best_epoch = epoch
                 best_state = {
                     name: value.detach().clone() for name, value in field.state_dict().items()
                 }
-            if validation_metrics["loss"] < stage_best * (1 - 1e-3):
-                stage_best = validation_metrics["loss"]
+            if validation_value < stage_best * (1 - 1e-3):
+                stage_best = validation_value
                 stale_epochs = 0
             else:
                 stale_epochs += 1
@@ -447,7 +450,7 @@ class NeuralSemigroupProblem:
                 print(
                     f"epoch={epoch + 1}/{max_epochs} "
                     f"train={epoch_metrics['loss']:.6e} "
-                    f"validation={validation_metrics['loss']:.6e} "
+                    f"validation={validation_value:.6e} "
                     f"samples={training_count}"
                 )
 
@@ -472,16 +475,13 @@ class NeuralSemigroupProblem:
                 field,
                 candidates,
                 candidate_targets,
-                candidate_directions,
-                candidate_target_jvps,
                 batch_size,
                 weights=weights,
-                jacobian_weight=jacobian_weight,
             )
             candidate_q99 = _upper_quantile(candidate_scores)
             if best_candidate_q99 is None or candidate_q99 < best_candidate_q99:
                 best_candidate_q99 = candidate_q99
-                best_loss = validation_metrics["loss"]
+                best_loss = validation_value
                 best_epoch = epoch
                 best_state = {
                     name: value.detach().clone() for name, value in field.state_dict().items()
@@ -509,11 +509,8 @@ class NeuralSemigroupProblem:
                 field,
                 train_states,
                 train_targets,
-                train_directions,
-                train_target_jvps,
                 batch_size,
                 weights=weights,
-                jacobian_weight=jacobian_weight,
             )
             training_q99 = _upper_quantile(training_scores)
             check["training_q99_loss"] = training_q99
@@ -533,26 +530,19 @@ class NeuralSemigroupProblem:
                     self.radius,
                     generator=generator,
                 )
-                new_directions = jacobian_directions(
-                    len(new_states),
-                    self.dimension,
-                    self.radius,
-                    generator=generator,
-                    device=device,
-                    dtype=dtype,
-                )
-                new_targets, new_target_jvps = reference_targets_and_jvps(
+                new_targets, new_target_jacobians = reference_targets_and_jacobians(
                     coordinate_system,
                     new_states,
-                    new_directions,
+                    radius=self.radius,
                     time_scale=self.time_scale,
                     batch_size=batch_size,
                 )
                 recent_start = len(train_states)
                 train_states = torch.cat((train_states, new_states), dim=0)
                 train_targets = torch.cat((train_targets, new_targets), dim=0)
-                train_directions = torch.cat((train_directions, new_directions), dim=0)
-                train_target_jvps = torch.cat((train_target_jvps, new_target_jvps), dim=0)
+                train_target_jacobians = torch.cat(
+                    (train_target_jacobians, new_target_jacobians), dim=0
+                )
                 emphasize_until = completed_epochs + max(1, min(patience, refine_every) // 2)
                 refinement_events.append(
                     {
@@ -563,7 +553,7 @@ class NeuralSemigroupProblem:
                         "training_q99_loss": training_q99,
                     }
                 )
-                best_loss = validation_metrics["loss"]
+                best_loss = validation_value
                 best_candidate_q99 = candidate_q99
                 best_epoch = epoch
                 best_state = {
@@ -591,18 +581,25 @@ class NeuralSemigroupProblem:
             field,
             train_states,
             train_targets,
-            train_directions,
-            train_target_jvps,
+            jacobian_basis,
+            train_target_jacobians,
             batch_size,
             weights=weights,
             jacobian_weight=jacobian_weight,
         )
-        final_validation = _mean_losses(
+        final_validation_value = _mean_value_loss(
             field,
             validation_states,
             validation_targets,
-            validation_directions,
-            validation_target_jvps,
+            batch_size,
+            weights=weights,
+        )
+        final_validation_audit = _mean_losses(
+            field,
+            validation_states[:jacobian_audit_samples],
+            validation_targets[:jacobian_audit_samples],
+            jacobian_basis,
+            validation_target_jacobians,
             batch_size,
             weights=weights,
             jacobian_weight=jacobian_weight,
@@ -613,11 +610,8 @@ class NeuralSemigroupProblem:
                 field,
                 candidates,
                 candidate_targets,
-                candidate_directions,
-                candidate_target_jvps,
                 batch_size,
                 weights=weights,
-                jacobian_weight=jacobian_weight,
             )
             candidate_q99_loss = _upper_quantile(final_candidate_scores)
         norms = field.spectral_norms()
@@ -628,6 +622,7 @@ class NeuralSemigroupProblem:
             "validation_value_loss": validation_value_losses,
             "training_jacobian_loss": training_jacobian_losses,
             "validation_jacobian_loss": validation_jacobian_losses,
+            "validation_jacobian_audits": validation_jacobian_audits,
             "candidate_checks": candidate_checks,
             "refinements": refinement_events,
         }
@@ -640,11 +635,11 @@ class NeuralSemigroupProblem:
             "refinements": len(refinement_events),
             "candidate_q99_loss": candidate_q99_loss,
             "training_loss": final_training["loss"],
-            "validation_loss": final_validation["loss"],
+            "validation_loss": final_validation_value,
             "training_value_loss": final_training["value_loss"],
-            "validation_value_loss": final_validation["value_loss"],
+            "validation_value_loss": final_validation_value,
             "training_jacobian_loss": final_training["jacobian_loss"],
-            "validation_jacobian_loss": final_validation["jacobian_loss"],
+            "validation_jacobian_loss": final_validation_audit["jacobian_loss"],
             "effective_lipschitz_bound": field.effective_lipschitz_bound(),
             "layer_spectral_norms": norms,
         }
@@ -666,7 +661,8 @@ class NeuralSemigroupProblem:
                 ),
                 "activation": "tanh",
                 "spectral_projection": "exact",
-                "loss": "component-balanced-sobolev-jvp",
+                "loss": "component-balanced-sobolev-full-jacobian",
+                "validation_objective": "component-balanced-field-values",
                 "autonomous": True,
             },
             "training": {
@@ -690,7 +686,10 @@ class NeuralSemigroupProblem:
                 "jacobian_weight": jacobian_weight,
                 "balance_epsilon": balance_epsilon,
                 "component_rms": component_rms.tolist(),
-                "jacobian_probe": "radius-scaled-rademacher",
+                "jacobian_probe": "complete-radius-scaled-canonical-basis",
+                "jacobian_directions": self.dimension,
+                "jacobian_audit_samples": jacobian_audit_samples,
+                "jacobian_audit_every": report_every,
                 "seed": seed,
                 "optimizer": "Adam",
                 "target_mode": ("cached-and-appended" if refinement_events else "cached"),

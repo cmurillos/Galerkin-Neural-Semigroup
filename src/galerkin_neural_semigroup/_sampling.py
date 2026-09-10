@@ -65,16 +65,9 @@ def radial_probe(count, dimension, radius, *, generator, device, dtype):
     return states.reshape(-1, dimension)[:count]
 
 
-def jacobian_directions(count, dimension, radius, *, generator, device, dtype):
-    """Return radius-scaled Rademacher probes for Jacobian supervision."""
-    directions = torch.randint(
-        0,
-        2,
-        (count, dimension),
-        generator=generator,
-        device=device,
-    )
-    return radius * (2 * directions.to(dtype=dtype) - 1)
+def canonical_directions(dimension, radius, *, device, dtype):
+    """Return the complete radius-scaled canonical basis."""
+    return radius * torch.eye(dimension, device=device, dtype=dtype)
 
 
 def adaptive_refinement(
@@ -167,29 +160,66 @@ def adaptive_refinement(
     return local
 
 
-def reference_targets_and_jvps(
+def values_and_full_jacobian(function, states, directions):
+    """Evaluate a batched map and all directional Jacobian columns."""
+    if states.ndim != 2:
+        raise ValueError("states must have shape [samples,dimension].")
+    if directions.shape != (states.shape[-1], states.shape[-1]):
+        raise ValueError("directions must be a square basis for the state dimension.")
+    values = None
+    columns = []
+    for direction in directions:
+        current, derivative = torch.func.jvp(
+            function,
+            (states,),
+            (direction.expand_as(states),),
+        )
+        if values is None:
+            values = current
+        columns.append(derivative)
+    jacobian = torch.stack(columns, dim=-1)
+    if values.shape != states.shape or jacobian.shape != (*states.shape, states.shape[-1]):
+        raise ValueError("The evaluated map changed the state or Jacobian shape.")
+    return values, jacobian
+
+
+def reference_targets_and_jacobians(
     reference,
     states,
-    directions,
     *,
+    radius,
     time_scale,
     batch_size,
 ):
-    """Return detached field values and directional derivatives in batches."""
-    if states.shape != directions.shape:
-        raise ValueError("states and Jacobian directions must have the same shape.")
+    """Return detached field values and complete Jacobians in batches."""
+    directions = canonical_directions(
+        states.shape[-1],
+        radius,
+        device=states.device,
+        dtype=states.dtype,
+    )
     outputs = []
     derivatives = []
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
-        direction = directions[start : start + batch_size]
-        values, jvp = torch.func.jvp(reference, (state,), (direction,))
-        if values.shape != state.shape or jvp.shape != state.shape:
-            raise ValueError("The internal reference evaluator changed the state shape.")
+        values, jacobian = values_and_full_jacobian(reference, state, directions)
         target = time_scale * values
-        target_jvp = time_scale * jvp
-        if not torch.isfinite(target).all() or not torch.isfinite(target_jvp).all():
+        target_jacobian = time_scale * jacobian
+        if not torch.isfinite(target).all() or not torch.isfinite(target_jacobian).all():
             raise FloatingPointError("The internal reference evaluator returned nonfinite data.")
         outputs.append(target.detach())
-        derivatives.append(target_jvp.detach())
+        derivatives.append(target_jacobian.detach())
     return torch.cat(outputs, dim=0), torch.cat(derivatives, dim=0)
+
+
+def reference_targets(reference, states, *, time_scale, batch_size):
+    """Return detached field values in batches without derivative materialization."""
+    outputs = []
+    for start in range(0, len(states), batch_size):
+        target = time_scale * reference(states[start : start + batch_size])
+        if target.shape != states[start : start + batch_size].shape:
+            raise ValueError("The internal reference evaluator changed the state shape.")
+        if not torch.isfinite(target).all():
+            raise FloatingPointError("The internal reference evaluator returned nonfinite data.")
+        outputs.append(target.detach())
+    return torch.cat(outputs, dim=0)

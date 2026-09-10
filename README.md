@@ -11,9 +11,9 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 The network is a `tanh` multilayer perceptron with exact spectral projection. If its
 global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
 continuous flow satisfies identity and composition by construction. Training compares
-component-balanced field values and Jacobian-vector products on the reduced ball; it
-does not generate reference trajectories. Optional adaptive refinement adds local
-samples where an independent probe finds a persistent coverage error.
+component-balanced field values and complete Jacobians on the reduced ball; it does not
+generate reference trajectories. Optional adaptive refinement adds local samples where
+an independent value probe finds a persistent coverage error.
 
 This repository is early research software. The mathematical and numerical contracts
 are explicit, but empirical claims will be added only after dedicated experiments.
@@ -90,9 +90,11 @@ semigroup = problem.train(
 normalized-volume sample, `tanh` activation, autonomous architecture, spectral
 projection and Adam optimizer are method decisions rather than user-facing objects.
 The loss balances every output component by its fixed inverse RMS scale on the initial
-design and combines field values with radius-scaled Jacobian-vector products.
-`jacobian_weight` controls derivative supervision and `balance_epsilon` places a
-relative floor under components with very small reference energy.
+design and combines field values with the complete radius-scaled Jacobian in all `N`
+canonical directions. `jacobian_weight` controls derivative supervision and
+`balance_epsilon` places a relative floor under components with very small reference
+energy. Independent value validation selects checkpoints and controls stopping; a small
+periodic full-Jacobian audit is reported only as a diagnostic.
 
 `epochs` is the minimum training budget and `max_epochs` is its hard epoch limit. If
 `max_epochs` is omitted it equals `epochs`, preserving fixed-budget training. Training
@@ -102,11 +104,11 @@ minimum budget. The best checkpoint is retained and `stop_reason` records the de
 
 Setting `refine_every` enables adaptive sampling. Once validation has failed to improve
 for `patience` epochs, a direction-randomized radial probe searches the complete range
-of radii. Refinement occurs only if its 99th-percentile error exceeds the corresponding
-training error by at least 25%. `refine_samples` states are then drawn from an
-error-weighted local kernel mixture with 15% global exploration. Field values and
-reference Jacobian-vector products remain private and cached. The histories
-`candidate_checks` and `refinements` record every adaptive decision.
+of radii. Refinement occurs only if its 99th-percentile value error exceeds the
+corresponding training error by at least 25%. `refine_samples` states are then drawn
+from an error-weighted local kernel mixture with 15% global exploration. Field values
+and complete reference Jacobians at training states remain private and cached. The
+histories `candidate_checks` and `refinements` record every adaptive decision.
 
 ## Evolution and reconstruction
 

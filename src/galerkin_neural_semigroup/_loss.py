@@ -14,54 +14,55 @@ def component_weights(targets, *, epsilon):
     return torch.rsqrt(component_energy + epsilon * mean_energy)
 
 
-def field_loss_terms(prediction, target, prediction_jvp, target_jvp, *, weights):
-    """Return per-state component-balanced value and Jacobian errors."""
+def field_value_error(prediction, target, *, weights):
+    """Return the per-state component-balanced value error."""
     if prediction.shape != target.shape:
         raise ValueError("prediction and target must have the same shape.")
-    if prediction_jvp.shape != target_jvp.shape or prediction_jvp.shape != target.shape:
-        raise ValueError("Jacobian-vector products and targets must have the same shape.")
     if weights.shape != target.shape[-1:]:
         raise ValueError("weights must contain one value per field component.")
-    value = ((prediction - target) * weights).square().mean(dim=-1)
-    jacobian = ((prediction_jvp - target_jvp) * weights).square().mean(dim=-1)
+    return ((prediction - target) * weights).square().mean(dim=-1)
+
+
+def field_loss_terms(
+    prediction,
+    target,
+    prediction_jacobian,
+    target_jacobian,
+    *,
+    weights,
+):
+    """Return per-state component-balanced value and full-Jacobian errors."""
+    value = field_value_error(prediction, target, weights=weights)
+    expected = (*target.shape, target.shape[-1])
+    if prediction_jacobian.shape != target_jacobian.shape:
+        raise ValueError("prediction and target Jacobians must have the same shape.")
+    if prediction_jacobian.shape != expected:
+        raise ValueError("Jacobians must have shape [samples,dimension,dimension].")
+    scaled = (prediction_jacobian - target_jacobian) * weights[None, :, None]
+    jacobian = scaled.square().mean(dim=(-2, -1))
     return value, jacobian
 
 
 def field_loss(
     prediction,
     target,
-    prediction_jvp,
-    target_jvp,
+    prediction_jacobian,
+    target_jacobian,
     *,
     weights,
     jacobian_weight,
 ):
-    """Return the balanced value loss plus weighted JVP loss."""
+    """Return the balanced value loss plus weighted full-Jacobian loss."""
     value, jacobian = field_loss_terms(
         prediction,
         target,
-        prediction_jvp,
-        target_jvp,
+        prediction_jacobian,
+        target_jacobian,
         weights=weights,
     )
     return (value + jacobian_weight * jacobian).mean()
 
 
-def adaptive_field_score(
-    prediction,
-    target,
-    prediction_jvp,
-    target_jvp,
-    *,
-    weights,
-    jacobian_weight,
-):
-    """Return the per-state balanced Sobolev score used by refinement."""
-    value, jacobian = field_loss_terms(
-        prediction,
-        target,
-        prediction_jvp,
-        target_jvp,
-        weights=weights,
-    )
-    return value + jacobian_weight * jacobian
+def adaptive_field_score(prediction, target, *, weights):
+    """Return the independent value score used by adaptive refinement."""
+    return field_value_error(prediction, target, weights=weights)

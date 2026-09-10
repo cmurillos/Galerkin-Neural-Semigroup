@@ -38,30 +38,36 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(semigroup.metadata["training"]["balance_epsilon"], 1e-6)
         self.assertEqual(
             semigroup.metadata["training"]["jacobian_probe"],
-            "radius-scaled-rademacher",
+            "complete-radius-scaled-canonical-basis",
         )
+        self.assertEqual(semigroup.metadata["training"]["jacobian_directions"], problem.dimension)
         self.assertIn("quadrature_order", semigroup.metadata["reference"])
         self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
         self.assertEqual(
             semigroup.metadata["method"]["loss"],
-            "component-balanced-sobolev-jvp",
+            "component-balanced-sobolev-full-jacobian",
+        )
+        self.assertEqual(
+            semigroup.metadata["method"]["validation_objective"],
+            "component-balanced-field-values",
         )
         self.assertIn("training_value_loss", semigroup.history)
         self.assertIn("validation_jacobian_loss", semigroup.history)
+        self.assertGreaterEqual(len(semigroup.history["validation_jacobian_audits"]), 1)
         self.assertTrue(semigroup.metrics["validation_value_loss"] >= 0)
         self.assertGreaterEqual(semigroup.metrics["validation_jacobian_loss"], 0)
         self.assertAlmostEqual(
             semigroup.metrics["validation_loss"],
-            semigroup.metrics["validation_value_loss"]
-            + 0.1 * semigroup.metrics["validation_jacobian_loss"],
+            semigroup.metrics["validation_value_loss"],
+        )
+        self.assertAlmostEqual(
+            semigroup.metrics["training_loss"],
+            semigroup.metrics["training_value_loss"]
+            + 0.1 * semigroup.metrics["training_jacobian_loss"],
         )
         self.assertLess(
             semigroup.metrics["validation_value_loss"],
             semigroup.history["validation_value_loss"][0],
-        )
-        self.assertLess(
-            semigroup.metrics["validation_jacobian_loss"],
-            semigroup.history["validation_jacobian_loss"][0],
         )
 
     def test_checkpoint_round_trip_uses_same_problem(self):

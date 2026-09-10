@@ -57,34 +57,36 @@ If the reference field is identically zero, `W` is the identity. Thus `epsilon >
 a relative floor rather than a dimensional constant, and global changes of target scale
 do not alter the balance between components.
 
-Each state receives one Rademacher vector `xi` whose coordinates are independently
-`-1` or `1`. The stored Jacobian direction is `V = R0 * xi`; multiplication by `R0`
-expresses the derivative in unit-ball coordinates without changing the public state
-coordinates. Numerical Galerkin Field supplies the exact directional derivative
-`J_Y(Z)V = tau * J_G(Z)V` through forward-mode automatic differentiation.
+Every state receives the complete canonical basis `e_1, ..., e_N`. The directions
+`V_k = R0 * e_k` express derivatives in unit-ball coordinates without changing the
+public state coordinates. Numerical Galerkin Field supplies all columns
+`J_Y(Z)V_k = tau * J_G(Z)V_k` through forward-mode automatic differentiation. Thus
+`K=N` at every training state and no random projection of the Jacobian remains.
 
 For `lambda_J >= 0`, the per-state terms are
 
 ```text
 L_value = mean_j [W(F(Z)-Y)]_j^2,
 
-L_jacobian = mean_j [W(J_F(Z)V-J_Y(Z)V)]_j^2,
+L_jacobian = mean_(j,k) [W(J_F(Z)-J_Y(Z)) R0]_(j,k)^2,
 
 L = L_value + lambda_J * L_jacobian.
 ```
 
 The inverse-RMS matrix prevents large target components from determining the entire fit.
-The JVP term supervises the first-order variation of the field without materializing a
-full Jacobian at every state. Values and JVP targets are evaluated in batches, detached
-from autograd and cached. Validation uses independent states and directions with the same
-fixed component weights.
+The derivative term supervises the complete first-order variation at every training
+state. Values and full Jacobian targets are evaluated in batches, detached from autograd
+and cached. Independent validation values use the same fixed component weights and are
+the sole checkpoint-selection, plateau and stopping objective. A complete-Jacobian audit
+on a small validation subset is computed periodically for diagnosis but never selects
+the returned model.
 
 Adaptive refinement, when requested, does not replace this objective. It changes the
 empirical design by appending states in regions where the current field has a persistent
-coverage error. Its selection score is the same per-state Sobolev loss:
+coverage error. Its independent selection score is the per-state value loss:
 
 ```text
-eta(z) = L_value(z) + lambda_J * L_jacobian(z).
+eta(z) = L_value(z).
 ```
 
 ## D-003 — Fixed neural architecture
@@ -149,11 +151,11 @@ problem.train(
 )
 ```
 
-Adam, one radius-scaled Rademacher direction per state, validation sampling and cached
-targets are currently fixed. `jacobian_weight` is nonnegative and `balance_epsilon` is
-strictly positive. Device selection defaults to CUDA when available and otherwise CPU.
-Computation uses float64 by default; `device` and `dtype` are explicit advanced overrides
-because they affect reproducibility.
+Adam, the complete radius-scaled canonical basis, validation sampling and cached targets
+are currently fixed. `jacobian_weight` is nonnegative and `balance_epsilon` is strictly
+positive. Device selection defaults to CUDA when available and otherwise CPU. Computation
+uses float64 by default; `device` and `dtype` are explicit advanced overrides because they
+affect reproducibility.
 
 `epochs` is the minimum budget whenever `max_epochs` is larger; omitting `max_epochs`
 recovers the previous exact epoch budget. `max_time` is a hard wall-clock budget in
@@ -181,12 +183,13 @@ percentile is at least 25% larger than its training counterpart; this separates 
 coverage deficit from an optimization or capacity deficit. For half of the following
 adaptation window, half of each epoch design is drawn from the newly appended states.
 
-Without an independent probe, the returned weights minimize validation loss. With
+Without an independent probe, the returned weights minimize validation value loss. With
 tolerance or adaptive refinement enabled, they minimize the probe's 99th-percentile
-score in the latest adaptive stage. All epochs are retained in `semigroup.history`.
-Total, value and Jacobian histories, candidate checks and refinement events are reported
-separately, together with the stop reason, elapsed time, final sample count, component
-scales, layer spectral norms and their product.
+value score in the latest adaptive stage. All epochs are retained in
+`semigroup.history`. Total and component training histories, value-validation history,
+periodic Jacobian audits, candidate checks and refinement events are reported separately,
+together with the stop reason, elapsed time, final sample count, component scales, layer
+spectral norms and their product.
 
 ## D-006 — Flow and numerical integration
 

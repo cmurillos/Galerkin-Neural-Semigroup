@@ -8,8 +8,9 @@
 - Expose a global Lipschitz budget independent of network depth.
 - Train on normalized-volume samples of the reduced ball without trajectories.
 - Replace relative-angular supervision with fixed component balancing and a
-  configurable Jacobian-vector-product term.
-- Report total, value and Jacobian training and validation losses separately.
+  configurable complete-Jacobian term using all canonical directions at every state.
+- Select checkpoints and stop from independent value validation while reporting periodic
+  full-Jacobian validation audits separately.
 - Add plateau-aware error refinement with radially stratified probes and local
   error-weighted kernel sampling.
 - Add minimum/maximum epoch budgets, tolerance, wall-clock and stalled-fit stopping
