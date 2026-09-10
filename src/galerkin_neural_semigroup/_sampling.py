@@ -1,11 +1,11 @@
 """Sampling and target preparation fixed by the learning functional."""
 
-from math import ceil, sqrt
+from math import sqrt
 
 import torch
 
 
-def uniform_ball(count, dimension, radius, *, generator, device, dtype):
+def _unit_directions(count, dimension, *, generator, device, dtype):
     directions = torch.randn(
         count,
         dimension,
@@ -24,45 +24,92 @@ def uniform_ball(count, dimension, radius, *, generator, device, dtype):
             dtype=dtype,
         )
         norms = torch.linalg.vector_norm(directions, dim=-1, keepdim=True)
-    radial = torch.rand(count, 1, generator=generator, device=device, dtype=dtype)
-    radial = radius * radial.pow(1.0 / dimension)
-    return radial * directions / norms
+    return directions / norms
 
 
-def radial_probe(count, dimension, radius, *, generator, device, dtype):
-    """Return a direction-randomized, radially stratified probe of a ball."""
-    levels = min(count, max(2, min(32, round(sqrt(count / dimension)))))
-    direction_count = ceil(count / levels)
-    directions = torch.randn(
-        direction_count,
+def initial_radial_layers(count, dimension, radius, *, device, dtype):
+    """Return the fixed initial radii, including the origin and boundary."""
+    if count < 2:
+        raise ValueError("radial sampling requires at least two states.")
+    if dimension < 1:
+        raise ValueError("radial sampling dimension must be positive.")
+    if radius <= 0:
+        raise ValueError("radial sampling radius must be positive.")
+    layer_count = min(count, max(2, min(32, round(sqrt(count / dimension)))))
+    return torch.linspace(0.0, radius, layer_count, device=device, dtype=dtype)
+
+
+def radial_design(count, dimension, layers, *, generator, device, dtype):
+    """Sample unit-sphere directions on prescribed concentric radial layers."""
+    if count < 1:
+        raise ValueError("radial design count must be positive.")
+    if dimension < 1:
+        raise ValueError("radial design dimension must be positive.")
+    if layers.ndim != 1 or len(layers) < 1:
+        raise ValueError("radial layers must be a nonempty vector.")
+    if layers.device != device or layers.dtype != dtype:
+        raise ValueError("radial layers must use the requested device and dtype.")
+    if not torch.isfinite(layers).all() or torch.any(layers < 0):
+        raise ValueError("radial layers must be finite and nonnegative.")
+    if len(layers) > 1 and torch.any(layers[1:] <= layers[:-1]):
+        raise ValueError("radial layers must be strictly increasing.")
+    if count < len(layers):
+        raise ValueError("radial design count must cover every layer.")
+
+    if len(layers) == 1:
+        layer_indices = torch.zeros(count, device=device, dtype=torch.long)
+    else:
+        positive = torch.arange(1, len(layers), device=device)
+        repeats = (count - 1 + len(positive) - 1) // len(positive)
+        positive = positive.repeat(repeats)[: count - 1]
+        positive = positive[torch.randperm(len(positive), generator=generator, device=device)]
+        layer_indices = torch.cat(
+            (torch.zeros(1, device=device, dtype=torch.long), positive),
+            dim=0,
+        )
+    directions = _unit_directions(
+        count,
         dimension,
         generator=generator,
         device=device,
         dtype=dtype,
     )
-    norms = torch.linalg.vector_norm(directions, dim=-1, keepdim=True)
-    while bool(torch.any(norms == 0).item()):
-        mask = (norms == 0).squeeze(-1)
-        directions[mask] = torch.randn(
-            int(mask.sum().item()),
-            dimension,
-            generator=generator,
-            device=device,
-            dtype=dtype,
-        )
-        norms = torch.linalg.vector_norm(directions, dim=-1, keepdim=True)
-    directions /= norms
-    offsets = torch.rand(
-        direction_count,
-        levels,
+    states = layers[layer_indices, None] * directions
+    states[layer_indices == 0] = 0
+    return states, layer_indices
+
+
+def radial_interval_probe(count, dimension, layers, *, generator, device, dtype):
+    """Sample unit-sphere directions at every adjacent-layer midpoint."""
+    if dimension < 1:
+        raise ValueError("radial probe dimension must be positive.")
+    if layers.ndim != 1 or len(layers) < 2:
+        raise ValueError("radial probe requires at least two layers.")
+    if layers.device != device or layers.dtype != dtype:
+        raise ValueError("radial layers must use the requested device and dtype.")
+    if not torch.isfinite(layers).all() or torch.any(layers < 0):
+        raise ValueError("radial layers must be finite and nonnegative.")
+    if torch.any(layers[1:] <= layers[:-1]):
+        raise ValueError("radial layers must be strictly increasing.")
+
+    interval_count = len(layers) - 1
+    if count < interval_count:
+        raise ValueError("radial probe count must cover every interval.")
+    interval_indices = torch.arange(interval_count, device=device)
+    repeats = (count + interval_count - 1) // interval_count
+    interval_indices = interval_indices.repeat(repeats)[:count]
+    interval_indices = interval_indices[
+        torch.randperm(len(interval_indices), generator=generator, device=device)
+    ]
+    midpoints = 0.5 * (layers[:-1] + layers[1:])
+    directions = _unit_directions(
+        count,
+        dimension,
         generator=generator,
         device=device,
         dtype=dtype,
     )
-    strata = torch.arange(levels, device=device, dtype=dtype)
-    radii = radius * (strata[None, :] + offsets) / levels
-    states = radii[..., None] * directions[:, None, :]
-    return states.reshape(-1, dimension)[:count]
+    return midpoints[interval_indices, None] * directions, interval_indices
 
 
 def canonical_directions(dimension, radius, *, device, dtype):
@@ -70,94 +117,61 @@ def canonical_directions(dimension, radius, *, device, dtype):
     return radius * torch.eye(dimension, device=device, dtype=dtype)
 
 
+def radial_error_profile(scores, radial_indices, radii):
+    """Average the independent value loss over directions at each probe radius."""
+    if scores.ndim != 1 or radial_indices.shape != scores.shape:
+        raise ValueError("scores and radial indices must be matching vectors.")
+    if radial_indices.dtype != torch.long:
+        raise ValueError("radial indices must be integers.")
+    if radii.ndim != 1 or len(radii) < 1:
+        raise ValueError("probe radii must be a nonempty vector.")
+    if torch.any(radial_indices < 0) or torch.any(radial_indices >= len(radii)):
+        raise ValueError("radial indices fall outside the supplied probe radii.")
+    if not torch.isfinite(scores).all() or torch.any(scores < 0):
+        raise ValueError("radial scores must be finite and nonnegative.")
+
+    radial_errors = torch.empty(len(radii), device=scores.device, dtype=scores.dtype)
+    for index in range(len(radii)):
+        shell_scores = scores[radial_indices == index]
+        if len(shell_scores) == 0:
+            raise ValueError("every radial layer must have candidate scores.")
+        radial_errors[index] = shell_scores.mean()
+    return radial_errors
+
+
 def adaptive_refinement(
     candidates,
     scores,
+    interval_indices,
+    layers,
     count,
-    radius,
     *,
     generator,
-    power=1.5,
-    exploration=0.15,
 ):
-    """Sample an error-weighted local kernel mixture with global probe exploration."""
+    """Insert a spherical layer inside the worst adjacent radial interval."""
     if count < 1:
         raise ValueError("adaptive refinement count must be positive.")
-    if radius <= 0:
-        raise ValueError("adaptive refinement radius must be positive.")
-    if power <= 0:
-        raise ValueError("adaptive refinement power must be positive.")
-    if not 0 <= exploration < 1:
-        raise ValueError("adaptive refinement exploration must lie in [0, 1).")
     if candidates.ndim != 2 or scores.shape != candidates.shape[:-1]:
         raise ValueError("candidates and scores have incompatible shapes.")
-    if len(candidates) < 2:
-        raise ValueError("adaptive refinement requires at least two candidates.")
-    if not torch.isfinite(scores).all() or torch.any(scores < 0):
-        raise ValueError("adaptive refinement scores must be finite and nonnegative.")
+    if layers.ndim != 1 or len(layers) < 2:
+        raise ValueError("adaptive refinement requires at least two radial layers.")
 
     device, dtype = candidates.device, candidates.dtype
     dimension = candidates.shape[-1]
-    local_count = max(1, round((1 - exploration) * count))
-    explore_count = count - local_count
-    floor = torch.finfo(dtype).eps
-    scale = torch.quantile(scores, 0.99).clamp_min(floor)
-    weights = ((scores.clamp(max=scale) + floor) / scale).pow(power)
-    center_indices = torch.multinomial(
-        weights,
-        local_count,
-        replacement=True,
-        generator=generator,
-    )
-    centers = candidates[center_indices]
+    midpoints = 0.5 * (layers[:-1] + layers[1:])
+    radial_errors = radial_error_profile(scores, interval_indices, midpoints)
 
-    pool_size = min(512, len(candidates))
-    pool_indices = torch.topk(weights, pool_size, sorted=False).indices
-    high_error = candidates[pool_indices]
-    distances = torch.cdist(centers, high_error)
-    neighbor = min(8, pool_size)
-    local_radius = distances.kthvalue(neighbor, dim=-1).values
-    local_radius = local_radius.clamp(min=0.005 * radius, max=0.15 * radius)
-    coordinate_scale = local_radius / sqrt(dimension)
-
-    local = centers + coordinate_scale[:, None] * torch.randn(
-        local_count,
+    interval_index = int(torch.argmax(radial_errors).item())
+    new_radius = midpoints[interval_index]
+    directions = _unit_directions(
+        count,
         dimension,
         generator=generator,
         device=device,
         dtype=dtype,
     )
-    invalid = torch.linalg.vector_norm(local, dim=-1) > radius
-    for _ in range(20):
-        if not bool(invalid.any().item()):
-            break
-        size = int(invalid.sum().item())
-        local[invalid] = centers[invalid] + coordinate_scale[invalid, None] * torch.randn(
-            size,
-            dimension,
-            generator=generator,
-            device=device,
-            dtype=dtype,
-        )
-        invalid = torch.linalg.vector_norm(local, dim=-1) > radius
-    local[invalid] = centers[invalid]
-
-    if explore_count:
-        if explore_count <= len(candidates):
-            exploration_indices = torch.randperm(
-                len(candidates),
-                generator=generator,
-                device=device,
-            )[:explore_count]
-        else:
-            exploration_indices = torch.randint(
-                len(candidates),
-                (explore_count,),
-                generator=generator,
-                device=device,
-            )
-        return torch.cat((local, candidates[exploration_indices]), dim=0)
-    return local
+    states = new_radius * directions
+    return states, new_radius, radial_errors, interval_index
 
 
 def values_and_full_jacobian(function, states, directions):

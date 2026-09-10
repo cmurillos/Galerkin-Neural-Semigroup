@@ -11,9 +11,9 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 The network is a `tanh` multilayer perceptron with exact spectral projection. If its
 global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
 continuous flow satisfies identity and composition by construction. Training compares
-component-balanced field values and complete Jacobians on the reduced ball; it does not
-generate reference trajectories. Optional adaptive refinement adds local samples where
-an independent value probe finds a persistent coverage error.
+component-balanced field values and complete Jacobians on concentric radial layers; it
+does not generate reference trajectories. Optional adaptive refinement inserts a new
+spherical layer inside the adjacent radial interval with the largest measured error.
 
 This repository is early research software. The mathematical and numerical contracts
 are explicit, but empirical claims will be added only after dedicated experiments.
@@ -86,12 +86,14 @@ semigroup = problem.train(
 )
 ```
 
-`basis.dimension` determines both the input and output dimensions. The initial
-normalized-volume sample, `tanh` activation, autonomous architecture, spectral
-projection and Adam optimizer are method decisions rather than user-facing objects.
-The loss balances every output component by its fixed inverse RMS scale on the initial
-design and combines field values with the complete radius-scaled Jacobian in all `N`
-canonical directions. `jacobian_weight` controls derivative supervision and
+`basis.dimension` determines both the input and output dimensions. The initial design
+uses equally spaced radii from `0` to `radius`; Gaussian directions are normalized to
+the unit sphere before each positive radius is applied. The origin is retained as a
+separate state. This concentric design, `tanh` activation, autonomous architecture,
+spectral projection and Adam optimizer are method decisions rather than user-facing
+objects. The loss balances every output component by its fixed inverse RMS scale on the
+initial design and combines field values with the complete radius-scaled Jacobian in all
+`N` canonical directions. `jacobian_weight` controls derivative supervision and
 `balance_epsilon` places a relative floor under components with very small reference
 energy. Independent value validation selects checkpoints and controls stopping; a small
 periodic full-Jacobian audit is reported only as a diagnostic.
@@ -103,12 +105,15 @@ can also stop when the 99th percentile of the independent probe score reaches
 minimum budget. The best checkpoint is retained and `stop_reason` records the decision.
 
 Setting `refine_every` enables adaptive sampling. Once validation has failed to improve
-for `patience` epochs, a direction-randomized radial probe searches the complete range
-of radii. Refinement occurs only if its 99th-percentile value error exceeds the
-corresponding training error by at least 25%. `refine_samples` states are then drawn
-from an error-weighted local kernel mixture with 15% global exploration. Field values
-and complete reference Jacobians at training states remain private and cached. The
-histories `candidate_checks` and `refinements` record every adaptive decision.
+for `patience` epochs, an independent probe measures the mean value error on a spherical
+shell halfway between every pair of current adjacent layers. The midpoint shell with
+the largest mean error defines the interval to refine. Refinement occurs only if the
+probe's 99th-percentile value error exceeds the corresponding training error by at least
+25%.
+`refine_samples` new unit-sphere directions are then placed at the interval midpoint,
+and later probes include that new layer. Field values and complete reference Jacobians
+at training states remain private and cached. `candidate_checks` records the complete
+radial error profile, while `refinements` records every inserted radius.
 
 ## Evolution and reconstruction
 

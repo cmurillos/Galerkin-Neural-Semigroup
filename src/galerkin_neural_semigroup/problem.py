@@ -11,10 +11,12 @@ from ._network import _SpectralMLP
 from ._sampling import (
     adaptive_refinement,
     canonical_directions,
-    radial_probe,
+    initial_radial_layers,
+    radial_design,
+    radial_error_profile,
+    radial_interval_probe,
     reference_targets,
     reference_targets_and_jacobians,
-    uniform_ball,
     values_and_full_jacobian,
 )
 from ._validation import (
@@ -146,9 +148,9 @@ class NeuralSemigroupProblem:
 
     The normal route receives an operational ``ngfield`` basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
-    restrictions are already carried by the basis. The initial normalized-volume
-    design, adaptive refinement rule, tanh MLP, component-balanced Sobolev loss and
-    exact spectral projection are fixed by the method.
+    restrictions are already carried by the basis. The concentric radial design,
+    adaptive radial refinement rule, tanh MLP, component-balanced Sobolev loss and exact
+    spectral projection are fixed by the method.
     """
 
     def __init__(
@@ -271,19 +273,27 @@ class NeuralSemigroupProblem:
         if coordinate_system.dimension != self.dimension:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
 
-        validation_samples = max(1, min(4096, samples // 10))
-        train_states = uniform_ball(
+        radial_layers = initial_radial_layers(
             samples,
             self.dimension,
             self.radius,
+            device=device,
+            dtype=dtype,
+        )
+        initial_layer_count = len(radial_layers)
+        train_states, _ = radial_design(
+            samples,
+            self.dimension,
+            radial_layers,
             generator=generator,
             device=device,
             dtype=dtype,
         )
-        validation_states = uniform_ball(
+        validation_samples = max(initial_layer_count - 1, min(4096, samples // 10))
+        validation_states, _ = radial_interval_probe(
             validation_samples,
             self.dimension,
-            self.radius,
+            radial_layers,
             generator=generator,
             device=device,
             dtype=dtype,
@@ -319,11 +329,13 @@ class NeuralSemigroupProblem:
         weights = component_weights(train_targets, epsilon=balance_epsilon)
         candidates = None
         candidate_targets = None
+        candidate_interval_indices = None
         if refine_every is not None or tolerance is not None:
-            candidates = radial_probe(
-                candidate_samples,
+            effective_candidate_samples = max(candidate_samples, len(radial_layers) - 1)
+            candidates, candidate_interval_indices = radial_interval_probe(
+                effective_candidate_samples,
                 self.dimension,
-                self.radius,
+                radial_layers,
                 generator=generator,
                 device=device,
                 dtype=dtype,
@@ -460,7 +472,9 @@ class NeuralSemigroupProblem:
                 break
 
             refinement_check_due = refine_every is not None and completed_epochs % refine_every == 0
-            refinement_due = refinement_check_due and stale_epochs >= patience
+            refinement_due = (
+                refinement_check_due and stale_epochs >= patience and completed_epochs < max_epochs
+            )
             accuracy_due = (
                 tolerance is not None
                 and completed_epochs >= epochs
@@ -479,6 +493,11 @@ class NeuralSemigroupProblem:
                 weights=weights,
             )
             candidate_q99 = _upper_quantile(candidate_scores)
+            candidate_radial_errors = radial_error_profile(
+                candidate_scores,
+                candidate_interval_indices,
+                0.5 * (radial_layers[:-1] + radial_layers[1:]),
+            )
             if best_candidate_q99 is None or candidate_q99 < best_candidate_q99:
                 best_candidate_q99 = candidate_q99
                 best_loss = validation_value
@@ -489,6 +508,14 @@ class NeuralSemigroupProblem:
             check = {
                 "epoch": completed_epochs,
                 "candidate_q99_loss": candidate_q99,
+                "radial_profile": [
+                    {"radius": float(radius.item()), "mean_loss": float(error.item())}
+                    for radius, error in zip(
+                        0.5 * (radial_layers[:-1] + radial_layers[1:]),
+                        candidate_radial_errors,
+                        strict=True,
+                    )
+                ],
             }
 
             if max_time is not None and perf_counter() - started_at >= max_time:
@@ -523,11 +550,12 @@ class NeuralSemigroupProblem:
 
             needs_refinement = tolerance is None or candidate_q99 > tolerance
             if coverage_gap and needs_refinement:
-                new_states = adaptive_refinement(
+                new_states, new_radius, radial_errors, interval_index = adaptive_refinement(
                     candidates,
                     candidate_scores,
+                    candidate_interval_indices,
+                    radial_layers,
                     refine_samples,
-                    self.radius,
                     generator=generator,
                 )
                 new_targets, new_target_jacobians = reference_targets_and_jacobians(
@@ -543,6 +571,31 @@ class NeuralSemigroupProblem:
                 train_target_jacobians = torch.cat(
                     (train_target_jacobians, new_target_jacobians), dim=0
                 )
+                lower_radius = float(radial_layers[interval_index].item())
+                upper_radius = float(radial_layers[interval_index + 1].item())
+                interval_error = float(radial_errors[interval_index].item())
+                radial_layers = torch.cat(
+                    (
+                        radial_layers[: interval_index + 1],
+                        new_radius.reshape(1),
+                        radial_layers[interval_index + 1 :],
+                    )
+                )
+                effective_candidate_samples = max(candidate_samples, len(radial_layers) - 1)
+                candidates, candidate_interval_indices = radial_interval_probe(
+                    effective_candidate_samples,
+                    self.dimension,
+                    radial_layers,
+                    generator=generator,
+                    device=device,
+                    dtype=dtype,
+                )
+                candidate_targets = reference_targets(
+                    coordinate_system,
+                    candidates,
+                    time_scale=self.time_scale,
+                    batch_size=batch_size,
+                )
                 emphasize_until = completed_epochs + max(1, min(patience, refine_every) // 2)
                 refinement_events.append(
                     {
@@ -551,10 +604,15 @@ class NeuralSemigroupProblem:
                         "training_samples": len(train_states),
                         "candidate_q99_loss": candidate_q99,
                         "training_q99_loss": training_q99,
+                        "lower_radius": lower_radius,
+                        "upper_radius": upper_radius,
+                        "new_radius": float(new_radius.item()),
+                        "interval_mean_loss": interval_error,
+                        "radial_layers": len(radial_layers),
                     }
                 )
-                best_loss = validation_value
-                best_candidate_q99 = candidate_q99
+                best_loss = float("inf")
+                best_candidate_q99 = None
                 best_epoch = epoch
                 best_state = {
                     name: value.detach().clone() for name, value in field.state_dict().items()
@@ -566,6 +624,7 @@ class NeuralSemigroupProblem:
                     print(
                         f"refinement epoch={completed_epochs} "
                         f"added={len(new_states)} "
+                        f"radius={float(new_radius.item()):.6e} "
                         f"candidate_q99={candidate_q99:.6e}"
                     )
             else:
@@ -655,9 +714,9 @@ class NeuralSemigroupProblem:
             },
             "method": {
                 "measure": (
-                    "adaptive-error-kernel-ball"
+                    "adaptive-concentric-radial-layers"
                     if refine_every is not None
-                    else "normalized-volume-ball"
+                    else "concentric-radial-layers"
                 ),
                 "activation": "tanh",
                 "spectral_projection": "exact",
@@ -679,9 +738,17 @@ class NeuralSemigroupProblem:
                 "refine_every": refine_every,
                 "refine_samples": refine_samples,
                 "candidate_samples": candidate_samples,
+                "effective_candidate_samples": (
+                    max(candidate_samples, len(radial_layers) - 1)
+                    if candidates is not None
+                    else None
+                ),
                 "patience": patience,
-                "adaptive_power": 1.5,
-                "adaptive_exploration": 0.15,
+                "initial_radial_layers": initial_layer_count,
+                "final_radial_layers": len(radial_layers),
+                "radial_layer_values": radial_layers.tolist(),
+                "radial_error": "mean-component-balanced-value-loss",
+                "radial_interval_rule": "largest-midpoint-shell-mean",
                 "lr": lr,
                 "jacobian_weight": jacobian_weight,
                 "balance_epsilon": balance_epsilon,

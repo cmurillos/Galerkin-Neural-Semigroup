@@ -44,6 +44,18 @@ class TrainingTests(unittest.TestCase):
         self.assertIn("quadrature_order", semigroup.metadata["reference"])
         self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
         self.assertEqual(
+            semigroup.metadata["method"]["measure"],
+            "concentric-radial-layers",
+        )
+        self.assertEqual(
+            semigroup.metadata["training"]["radial_layer_values"][0],
+            0.0,
+        )
+        self.assertEqual(
+            semigroup.metadata["training"]["radial_layer_values"][-1],
+            problem.radius,
+        )
+        self.assertEqual(
             semigroup.metadata["method"]["loss"],
             "component-balanced-sobolev-full-jacobian",
         )
@@ -155,6 +167,17 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(semigroup.metrics["refinements"], 1)
         self.assertEqual(semigroup.metrics["training_samples"], 20)
         self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached-and-appended")
+        event = semigroup.history["refinements"][0]
+        self.assertAlmostEqual(
+            event["new_radius"],
+            0.5 * (event["lower_radius"] + event["upper_radius"]),
+        )
+        self.assertEqual(event["radial_layers"], 4)
+        self.assertEqual(len(semigroup.history["candidate_checks"][0]["radial_profile"]), 2)
+        self.assertEqual(
+            semigroup.metadata["training"]["radial_interval_rule"],
+            "largest-midpoint-shell-mean",
+        )
 
     def test_max_epochs_cannot_precede_minimum_epochs(self):
         with self.assertRaisesRegex(ValueError, "greater than or equal"):

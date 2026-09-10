@@ -30,19 +30,28 @@ an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
 The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
 `GalerkinProblem` workflows. Neither route returns the numerical reference field.
 
-## D-002 — Initial measure and component-balanced Sobolev objective
+## D-002 — Radial design and component-balanced Sobolev objective
 
-Initial training states are independent samples from normalized Lebesgue volume on
-
-```text
-B_N(R0) = {z in R^N : ||z||_2 < R0}.
-```
-
-For a standard Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation uses
+For `m` initial states in dimension `N`, the method fixes
 
 ```text
-z = R0 * s^(1/N) * xi / ||xi||_2.
+L = min(m, max(2, min(32, round(sqrt(m/N)))))
+
+r_l = l R0/(L-1),  l = 0, ..., L-1.
 ```
+
+It retains `z=0` once. The other states are distributed as evenly as possible over the
+positive radii. At each such radius it draws an independent standard Gaussian `xi`,
+normalizes it, and sets
+
+```text
+u = xi/||xi||_2,    z = r_l u.
+```
+
+Thus angular samples are uniform on the unit sphere, the origin and boundary are both
+represented, and the radial design does not acquire the high-dimensional concentration
+near `R0` of normalized Lebesgue volume. Independent validation uses new directions on
+the midpoint shell of every initial adjacent-layer interval.
 
 Let `Y = tau * G(Z)` be the cached scaled Galerkin target. Component scales are computed
 once from the initial training design and remain fixed after adaptive refinements:
@@ -165,23 +174,30 @@ level. Two unsuccessful plateau checks terminate with `stop_reason="stalled"`.
 
 Setting `refine_every` enables refinement checks at that epoch interval. A check is
 eligible only after `patience` epochs without a relative validation improvement of
-`1e-3`. The candidate design uses randomized directions and at most 32 radial strata;
-it is a search probe, not the final training measure. Let `eta_i` be candidate scores.
-To prevent a single numerical outlier from dominating the design, scores are capped at
-their 99th percentile. Local kernel centers are sampled with probabilities proportional
-to
+`1e-3`. The independent candidate design uses new unit-sphere directions distributed
+over the midpoint shell of every current adjacent-layer interval. If `I_l` indexes
+candidates on `rho_l = (r_l+r_(l+1))/2`, its radial error profile is
 
 ```text
-(min(eta_i, quantile_0.99(eta)) + machine_epsilon)^1.5.
+E_l = mean_(i in I_l) eta(z_i),
 ```
 
-Kernel bandwidth is determined by the eighth-neighbor distance within the 512
-candidates of largest weight and clipped between `0.005 R0` and `0.15 R0`. Gaussian
-proposals outside the ball are rejected. The refinement mixture uses 85% local
-proposals and 15% global probe states. Refinement occurs only when the candidate 99th
-percentile is at least 25% larger than its training counterpart; this separates a
-coverage deficit from an optimization or capacity deficit. For half of the following
-adaptation window, half of each epoch design is drawn from the newly appended states.
+The method chooses an index in `argmax_l E_l` and inserts `refine_samples` new states on
+the spherical layer of radius
+
+```text
+r_new = (r_l + r_(l+1))/2.
+```
+
+Choosing the largest, rather than smallest, interval error is essential: the added
+layer must increase resolution where the learned field is least accurate between
+existing layers. Refinement still occurs only when the candidate 99th percentile is at
+least 25% larger than its training counterpart; this separates a coverage deficit from
+an optimization or
+capacity deficit. The independent probe is rebuilt over the enlarged ordered layer set.
+For half of the following adaptation window, half of each epoch design is drawn from the
+newly appended states. Candidate history records `(radius, E_l)` for every check, and a
+refinement event records the selected interval and its midpoint.
 
 Without an independent probe, the returned weights minimize validation value loss. With
 tolerance or adaptive refinement enabled, they minimize the probe's 99th-percentile
@@ -220,11 +236,11 @@ supplying the same ordered operational basis; a stronger content hash is future 
 
 ## D-008 — Scope
 
-- Training controls a field only on the sampled reduced ball; the ball is not asserted
-  to be positively invariant.
+- Training controls a field only on a finite radial design inside the reduced ball; the
+  ball is not asserted to be positively invariant.
 - A small empirical loss or probe quantile is not a certified uniform error.
-- Adaptive refinement can only discover difficult regions represented by its finite
-  radially stratified probe.
+- Adaptive refinement resolves radial variation but can only discover angular errors
+  represented by its finite unit-sphere probe.
 - Exact spectral projection guarantees global well-posedness of the learned ODE but does
   not establish convergence to the original infinite-dimensional evolution.
 - Explicit integration may be expensive for stiff reduced dynamics.
