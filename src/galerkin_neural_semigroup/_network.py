@@ -8,6 +8,8 @@ from torch.nn import functional as functional
 
 from ._validation import hidden_widths, positive_integer, positive_real
 
+UNIT_BALL_NORMALIZATION = "unit-ball"
+
 
 class _SpectralMLP(nn.Module):
     """A tanh MLP whose affine weights are projected onto spectral balls."""
@@ -105,3 +107,53 @@ class _SpectralMLP(nn.Module):
             "hidden": list(self.hidden),
             "lipschitz": self.lipschitz_bound,
         }
+
+
+class _UnitBallField(nn.Module):
+    """Expose a unit-ball network as a field in physical reduced coordinates."""
+
+    def __init__(self, core, radius):
+        super().__init__()
+        if not isinstance(core, _SpectralMLP):
+            raise TypeError("core must be a spectral MLP.")
+        self.core = core
+        self.radius = positive_real(radius, "radius")
+
+    @property
+    def dimension(self):
+        return self.core.dimension
+
+    @property
+    def device(self):
+        return self.core.device
+
+    @property
+    def dtype(self):
+        return self.core.dtype
+
+    def _states(self, states):
+        self.core._states(states)
+
+    def normalized(self, states):
+        """Evaluate the learned field in unit-ball coordinates."""
+        return self.core(states)
+
+    def forward(self, states):
+        """Evaluate ``R * core(z / R)`` for physical reduced coordinates ``z``."""
+        self._states(states)
+        return self.radius * self.core(states / self.radius)
+
+    def spectral_norms(self):
+        return self.core.spectral_norms()
+
+    def effective_lipschitz_bound(self):
+        return self.core.effective_lipschitz_bound()
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        self.core._evaluation_weights = None
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def configuration(self):
+        configuration = self.core.configuration()
+        configuration["coordinate_normalization"] = UNIT_BALL_NORMALIZATION
+        return configuration

@@ -77,26 +77,34 @@ semigroup = problem.train(
 )
 ```
 
-`basis.dimension` determines both the input and output dimensions. Sampling has exactly
-two fixed, non-adaptive options. If `U` is uniform on `(0,1)` and `xi` is a standard
-Gaussian direction, both are generated in one vectorized operation:
+`basis.dimension` determines both the input and output dimensions. The network is always
+trained in normalized coordinates `x = z / R`, so its input domain has radius one even
+when the physical reduced domain has radius `R`. Sampling has exactly two fixed,
+non-adaptive options. If `U` is uniform on `(0,1)` and `xi` is a standard Gaussian
+direction, both are generated in one vectorized operation:
 
-| `sampling` | Radius | Measure |
-| --- | --- | --- |
-| `"volume"` | `R * U**(1/N)` | Normalized volume on the ball (default). |
-| `"radius"` | `R * U` | Uniform radius and uniform angle. |
+| `sampling` | Unit radius | Physical radius | Measure |
+| --- | --- | --- | --- |
+| `"volume"` | `U**(1/N)` | `R * U**(1/N)` | Normalized volume (default). |
+| `"radius"` | `U` | `R * U` | Uniform radius and uniform angle. |
 
-In both cases `z = rho * xi / ||xi||`. Training and validation states are drawn once
-from independent samples of the selected measure and are not adapted or resampled.
-The only learning objective is
+In both cases `x = q * xi / ||xi||` and the reference is evaluated at the physical state
+`z = R * x`. Training and validation states are drawn once from independent samples of
+the selected measure and are not adapted or resampled. For `time_scale = tau`, the
+normalized target and the only learning objective are
 
 ```text
-mean_i ||F_theta(z_i) - time_scale * G(z_i)||_2^2.
+G_hat(x) = (tau / R) * G(R * x),
+mean_i ||F_hat_theta(x_i) - G_hat(x_i)||_2^2.
 ```
 
 It is evaluated over tensor batches, with no angular, relative, Jacobian or adaptive
 term. The `tanh` architecture, exact spectral projection and Adam optimizer remain
-fixed method decisions.
+fixed method decisions. The normalization is transparent to the public API:
+
+```text
+semigroup.field(z) = R * F_hat_theta(z / R).
+```
 
 ## Evolution and reconstruction
 
@@ -111,8 +119,9 @@ points = torch.linspace(0, 1, 101, dtype=semigroup.dtype, device=semigroup.devic
 U = semigroup.reconstruct(Z, points)
 ```
 
-The learned scaled field is available as `semigroup.field(z)`. When `time_scale` is
-not one, `semigroup.velocity(z)` returns the corresponding physical-time velocity.
+The learned scaled field is available as `semigroup.field(z)` in the original reduced
+coordinates. When `time_scale` is not one, `semigroup.velocity(z)` returns the
+corresponding physical-time velocity.
 The composition diagnostic
 
 ```python

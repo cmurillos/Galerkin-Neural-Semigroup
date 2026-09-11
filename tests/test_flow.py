@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from galerkin_neural_semigroup._network import _SpectralMLP
+from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
 from galerkin_neural_semigroup.semigroup import NeuralSemigroup
 
 from ._fixtures import heat_problem
@@ -15,7 +15,7 @@ class FlowTests(unittest.TestCase):
             device=torch.device("cpu"),
             dtype=torch.float64,
         )
-        field = _SpectralMLP(
+        core = _SpectralMLP(
             2,
             (),
             1.0,
@@ -23,12 +23,13 @@ class FlowTests(unittest.TestCase):
             dtype=torch.float64,
         )
         with torch.no_grad():
-            field.weights[0].copy_(-0.5 * torch.eye(2, dtype=torch.float64))
-            field.biases[0].zero_()
+            core.weights[0].copy_(-0.5 * torch.eye(2, dtype=torch.float64))
+            core.biases[0].zero_()
+        field = _UnitBallField(core, radius=3.0)
         self.semigroup = NeuralSemigroup(
             field=field,
             coordinate_system=coordinate_system,
-            radius=1.0,
+            radius=3.0,
             time_scale=2.0,
         )
 

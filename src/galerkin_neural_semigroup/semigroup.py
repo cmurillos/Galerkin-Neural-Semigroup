@@ -8,6 +8,7 @@ from types import MappingProxyType
 import torch
 
 from ._integration import solve as integrate
+from ._network import UNIT_BALL_NORMALIZATION
 from ._validation import positive_real
 
 
@@ -16,8 +17,9 @@ class NeuralSemigroup:
 
     Instances are returned by :meth:`NeuralSemigroupProblem.train` or
     :meth:`NeuralSemigroupProblem.load`; users do not construct them directly.
-    ``field`` is the learned autonomous field. The Galerkin reference used during
-    training remains private.
+    ``field`` is the learned autonomous field in physical reduced coordinates.
+    Unit-ball normalization and the Galerkin reference used during training remain
+    internal.
     """
 
     def __init__(
@@ -150,10 +152,14 @@ class NeuralSemigroup:
         """Save network parameters and reproducibility metadata, but not the oracle."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        configuration = self.field.configuration()
+        schema_version = (
+            2 if configuration.get("coordinate_normalization") == UNIT_BALL_NORMALIZATION else 1
+        )
         checkpoint = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "package_version": "0.1.0",
-            "field_configuration": self.field.configuration(),
+            "field_configuration": configuration,
             "field_state": self.field.state_dict(),
             "radius": self.radius,
             "time_scale": self.time_scale,

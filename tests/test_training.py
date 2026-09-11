@@ -5,7 +5,8 @@ from pathlib import Path
 import torch
 
 from galerkin_neural_semigroup import NeuralSemigroup
-from galerkin_neural_semigroup.problem import _field_loss
+from galerkin_neural_semigroup._network import _SpectralMLP
+from galerkin_neural_semigroup.problem import _basis_signature, _field_loss
 
 from ._fixtures import heat_problem
 
@@ -26,7 +27,7 @@ class TrainingTests(unittest.TestCase):
         torch.testing.assert_close(prediction.grad, prediction.detach())
 
     def test_linear_training_reduces_independent_field_error(self):
-        problem = heat_problem()
+        problem = heat_problem(radius=3.0)
         semigroup = problem.train(
             hidden=(),
             lipschitz=2.0,
@@ -53,6 +54,17 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(
             semigroup.metadata["method"]["loss"],
             "mean-squared-euclidean-field-error",
+        )
+        self.assertEqual(
+            semigroup.metadata["method"]["coordinate_normalization"],
+            "unit-ball",
+        )
+        self.assertEqual(semigroup.metadata["method"]["loss_coordinates"], "unit-ball")
+        self.assertEqual(semigroup.metadata["training"]["network_radius"], 1.0)
+        states = torch.randn(5, problem.dimension, dtype=semigroup.dtype)
+        torch.testing.assert_close(
+            semigroup.field(states),
+            problem.radius * semigroup.field.normalized(states / problem.radius),
         )
         self.assertEqual(
             set(semigroup.history),
@@ -98,10 +110,52 @@ class TrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.gns"
             semigroup.save(path)
+            checkpoint = torch.load(path, weights_only=True)
+            self.assertEqual(checkpoint["schema_version"], 2)
+            self.assertEqual(
+                checkpoint["field_configuration"]["coordinate_normalization"],
+                "unit-ball",
+            )
             restored = problem.load(path, device="cpu")
         torch.testing.assert_close(restored.field(states), expected)
         self.assertEqual(dict(restored.metrics), dict(semigroup.metrics))
         self.assertEqual(dict(restored.history), dict(semigroup.history))
+
+    def test_schema_one_checkpoint_remains_loadable_without_reinterpretation(self):
+        problem = heat_problem(radius=2.0)
+        coordinate_system = problem._build_coordinate_system(
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+        field = _SpectralMLP(
+            problem.dimension,
+            (),
+            2.0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+        field.eval()
+        semigroup = NeuralSemigroup(
+            field=field,
+            coordinate_system=coordinate_system,
+            radius=problem.radius,
+            time_scale=problem.time_scale,
+            metadata={
+                "basis": _basis_signature(problem.basis),
+                "dtype": "float64",
+            },
+        )
+        states = torch.randn(4, problem.dimension, dtype=torch.float64)
+        expected = semigroup.field(states)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.gns"
+            semigroup.save(path)
+            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 1)
+            restored = problem.load(path, device="cpu")
+
+        torch.testing.assert_close(restored.field(states), expected)
+        self.assertFalse(hasattr(restored.field, "normalized"))
 
     def test_load_rejects_different_training_domain(self):
         problem = heat_problem(radius=1.0)

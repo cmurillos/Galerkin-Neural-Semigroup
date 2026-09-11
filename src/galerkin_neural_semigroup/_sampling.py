@@ -14,8 +14,8 @@ def sampling_mode(value):
     return value
 
 
-def sample_ball(count, dimension, radius, *, sampling, generator, device, dtype):
-    """Sample a ball uniformly in volume or uniformly in radius."""
+def sample_unit_ball(count, dimension, *, sampling, generator, device, dtype):
+    """Sample the unit ball uniformly in volume or uniformly in radius."""
     sampling = sampling_mode(sampling)
     directions = torch.randn(
         count,
@@ -36,16 +36,16 @@ def sample_ball(count, dimension, radius, *, sampling, generator, device, dtype)
     )
     if sampling == "volume":
         radii = radii.pow(1.0 / dimension)
-    return radius * radii * directions
+    return radii * directions
 
 
 @torch.no_grad()
-def reference_targets(reference, states, *, time_scale, batch_size):
-    """Return detached scaled field values in vectorized batches."""
+def unit_ball_targets(reference, states, *, radius, time_scale, batch_size):
+    """Evaluate ``(time_scale / radius) * G(radius * x)`` in batches."""
     outputs = []
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
-        target = time_scale * reference(state)
+        target = (time_scale / radius) * reference(radius * state)
         if target.shape != state.shape:
             raise ValueError("The internal reference evaluator changed the state shape.")
         if not torch.isfinite(target).all():

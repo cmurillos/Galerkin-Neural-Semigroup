@@ -5,8 +5,8 @@ from pathlib import Path
 
 import torch
 
-from ._network import _SpectralMLP
-from ._sampling import reference_targets, sample_ball, sampling_mode
+from ._network import UNIT_BALL_NORMALIZATION, _SpectralMLP, _UnitBallField
+from ._sampling import sample_unit_ball, sampling_mode, unit_ball_targets
 from ._validation import (
     compute_device,
     floating_dtype,
@@ -165,43 +165,46 @@ class NeuralSemigroupProblem:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
 
         validation_samples = max(1, min(4096, samples // 10))
-        train_states = sample_ball(
+        train_unit_states = sample_unit_ball(
             samples,
             self.dimension,
-            self.radius,
             sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
         )
-        validation_states = sample_ball(
+        validation_unit_states = sample_unit_ball(
             validation_samples,
             self.dimension,
-            self.radius,
             sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
         )
-        train_targets = reference_targets(
+        train_targets = unit_ball_targets(
             coordinate_system,
-            train_states,
+            train_unit_states,
+            radius=self.radius,
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
-        validation_targets = reference_targets(
+        validation_targets = unit_ball_targets(
             coordinate_system,
-            validation_states,
+            validation_unit_states,
+            radius=self.radius,
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
 
-        field = _SpectralMLP(
-            self.dimension,
-            hidden,
-            lipschitz,
-            device=device,
-            dtype=dtype,
+        field = _UnitBallField(
+            _SpectralMLP(
+                self.dimension,
+                hidden,
+                lipschitz,
+                device=device,
+                dtype=dtype,
+            ),
+            self.radius,
         )
         optimizer = torch.optim.Adam(field.parameters(), lr=lr)
         training_losses = []
@@ -218,7 +221,7 @@ class NeuralSemigroupProblem:
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
                 loss = _field_loss(
-                    field(train_states[indices]),
+                    field.normalized(train_unit_states[indices]),
                     train_targets[indices],
                 )
                 if not torch.isfinite(loss):
@@ -230,8 +233,8 @@ class NeuralSemigroupProblem:
             epoch_loss /= samples
             field.eval()
             validation_loss = _mean_loss(
-                field,
-                validation_states,
+                field.normalized,
+                validation_unit_states,
                 validation_targets,
                 batch_size,
             )
@@ -251,7 +254,12 @@ class NeuralSemigroupProblem:
 
         field.load_state_dict(best_state)
         field.eval()
-        final_training_loss = _mean_loss(field, train_states, train_targets, batch_size)
+        final_training_loss = _mean_loss(
+            field.normalized,
+            train_unit_states,
+            train_targets,
+            batch_size,
+        )
         norms = field.spectral_norms()
         history = {
             "training_loss": training_losses,
@@ -283,6 +291,8 @@ class NeuralSemigroupProblem:
                 "activation": "tanh",
                 "spectral_projection": "exact",
                 "loss": "mean-squared-euclidean-field-error",
+                "loss_coordinates": UNIT_BALL_NORMALIZATION,
+                "coordinate_normalization": UNIT_BALL_NORMALIZATION,
                 "autonomous": True,
             },
             "training": {
@@ -295,6 +305,7 @@ class NeuralSemigroupProblem:
                 "seed": seed,
                 "optimizer": "Adam",
                 "target_mode": "cached",
+                "network_radius": 1.0,
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
@@ -314,7 +325,8 @@ class NeuralSemigroupProblem:
         """Load a checkpoint against this problem's basis and weak formulation."""
         device = compute_device(device)
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
-        if checkpoint.get("schema_version") != 1:
+        schema_version = checkpoint.get("schema_version")
+        if schema_version not in (1, 2):
             raise ValueError("Unsupported Galerkin Neural Semigroup checkpoint schema.")
         configuration = checkpoint.get("field_configuration", {})
         if configuration.get("dimension") != self.dimension:
@@ -332,13 +344,19 @@ class NeuralSemigroupProblem:
                 raise ValueError("The checkpoint records an unsupported dtype.")
         dtype = floating_dtype(dtype)
         coordinate_system = self._build_coordinate_system(device=device, dtype=dtype)
-        field = _SpectralMLP(
+        core = _SpectralMLP(
             self.dimension,
             configuration["hidden"],
             configuration["lipschitz"],
             device=device,
             dtype=dtype,
         )
+        if schema_version == 2:
+            if configuration.get("coordinate_normalization") != UNIT_BALL_NORMALIZATION:
+                raise ValueError("The checkpoint records an unsupported coordinate normalization.")
+            field = _UnitBallField(core, self.radius)
+        else:
+            field = core
         field.load_state_dict(checkpoint["field_state"])
         field.eval()
         return NeuralSemigroup(

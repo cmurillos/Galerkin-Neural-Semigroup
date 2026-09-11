@@ -32,31 +32,40 @@ The compatibility constructor `from_galerkin(problem, ...)` is reserved for expl
 
 ## D-002 — Two fixed learning measures and direct objective
 
-Training states lie in
+The physical training domain is
 
 ```text
 B_N(R0) = {z in R^N : ||z||_2 < R0}.
 ```
 
-For a standard Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation
-offers exactly two fixed, non-adaptive measures:
+The network sees normalized coordinates `x = z/R0` in `B_N(1)`. For a standard
+Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation offers exactly two
+fixed, non-adaptive measures:
 
 ```text
-sampling="volume": z = R0 * s^(1/N) * xi / ||xi||_2,
-sampling="radius": z = R0 * s       * xi / ||xi||_2.
+sampling="volume": x = s^(1/N) * xi / ||xi||_2,
+sampling="radius": x = s       * xi / ||xi||_2,
+physical state:    z = R0 * x.
 ```
 
 The first is normalized Lebesgue volume on the ball. The second is the product of the
 uniform radial measure on `(0,R0)` and uniform angular measure on the unit sphere.
-Directions, radii and state tensors are generated vectorially. Training and validation
-states are drawn once from independent samples of the same selected measure. Epochs
-shuffle the fixed training tensor; they neither resample it nor change its distribution.
+Directions, radii, normalized states and physical target states are generated
+vectorially. Training and validation states are drawn once from independent samples of
+the same selected measure. Epochs shuffle the fixed training tensor; they neither
+resample it nor change its distribution.
 
-For `Y = tau * G(Z)`, the sole empirical objective is the batch mean of the squared
-Euclidean field difference:
+For the normalized target
 
 ```text
-L_B(theta) = ||F_theta(Z) - Y||_F^2 / B.
+G_hat(x) = (tau/R0) * G(R0*x),
+```
+
+the sole empirical objective is the batch mean of the squared Euclidean field
+difference:
+
+```text
+L_B(theta) = ||F_hat_theta(X) - G_hat(X)||_F^2 / B.
 ```
 
 It sums rather than averages over the coordinate dimension. Galerkin targets are
@@ -65,10 +74,10 @@ angular, derivative, Jacobian or adaptive-refinement term.
 
 ## D-003 — Fixed neural architecture
 
-The learned field is autonomous and has signature
+The normalized neural field is autonomous and has signature
 
 ```text
-F: [...,N] -> [...,N].
+F_hat: [...,N] -> [...,N].
 ```
 
 It is an affine MLP with componentwise `tanh` between affine layers and no activation
@@ -82,9 +91,16 @@ Wbar_k = W_k / max(1, ||W_k||_2 / gamma).
 ```
 
 If there are `d` affine layers and the user requests global budget `Lmax`, the package
-sets `gamma = Lmax^(1/d)`. Hence `Lip(F) <= Lmax` independently of depth. Spectral norms
-are computed by `torch.linalg.matrix_norm(..., ord=2)`; a finite power-iteration estimate
-is not used as a certificate.
+sets `gamma = Lmax^(1/d)`. The field exposed in physical reduced coordinates is
+
+```text
+F(z) = R0 * F_hat(z/R0).
+```
+
+The input and output factors cancel in its Lipschitz quotient, so
+`Lip(F) = Lip(F_hat) <= Lmax` independently of depth. Spectral norms are computed by
+`torch.linalg.matrix_norm(..., ord=2)`; a finite power-iteration estimate is not used as
+a certificate.
 
 During optimization the projection remains in the differentiable forward map. Once
 the module enters evaluation mode, the projected weights are cached because they are
@@ -95,9 +111,11 @@ parameter differentiation when it is explicitly required.
 
 ## D-004 — Time scaling
 
-With `time_scale=tau`, targets approximate `tau * G(z)` and the trained field evolves in
-scaled time `s=t/tau`. Public `solve` accepts physical times and performs this conversion
-internally. Thus `semigroup.field(z)` is the scaled field and
+With `time_scale=tau`, the normalized targets approximate
+`(tau/R0) * G(R0*x)`. After the inverse coordinate transform, the public field
+approximates `tau * G(z)` and evolves in scaled time `s=t/tau`. Public `solve` accepts
+physical times and performs this conversion internally. Thus `semigroup.field(z)` is the
+scaled field in the original reduced coordinates and
 `semigroup.velocity(z) = semigroup.field(z)/tau` is the learned physical-time velocity.
 
 ## D-005 — Training interface
@@ -122,7 +140,8 @@ two measures in D-002 and does not change during training. Device selection defa
 CUDA when available and otherwise CPU. Computation uses float64 by default; `device`
 and `dtype` are explicit advanced overrides because they affect reproducibility.
 
-The returned weights are those with minimum independent validation loss. All epochs are
+The returned weights are those with minimum independent validation loss. Training and
+validation losses are values of the normalized direct objective in D-002. All epochs are
 retained in `semigroup.history`; final metrics include the layer spectral norms and their
 product.
 
@@ -143,11 +162,13 @@ term.
 
 ## D-007 — Persistence and provenance
 
-Checkpoints contain neural parameters, architecture, `R0`, time scale, optimization
-history, basis signature, precision, device and the pinned reference-package revision.
-They do not serialize the weak-form evaluator or the private numerical field. Loading
-therefore occurs through the same `NeuralSemigroupProblem` and rejects incompatible
-dimensions, signatures, radii or time scales.
+Version-2 checkpoints contain neural parameters, architecture, the unit-ball
+normalization marker, `R0`, time scale, optimization history, basis signature, precision,
+device and the pinned reference-package revision. They do not serialize the weak-form
+evaluator or the private numerical field. Loading therefore occurs through the same
+`NeuralSemigroupProblem` and rejects incompatible dimensions, signatures, radii or time
+scales. Version-1 checkpoints remain loadable with their original, unnormalized field
+semantics and are never silently reinterpreted.
 
 The current basis signature is deliberately conservative: dimension, physical value
 shape, family and component allocation when available. The user remains responsible for

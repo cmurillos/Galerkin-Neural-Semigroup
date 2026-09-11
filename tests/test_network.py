@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from galerkin_neural_semigroup._network import _SpectralMLP
+from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
 
 
 class SpectralMLPTests(unittest.TestCase):
@@ -70,6 +70,31 @@ class SpectralMLPTests(unittest.TestCase):
             field(torch.zeros(2, 3, dtype=torch.float32))
         with self.assertRaises(TypeError):
             field(torch.zeros(3, dtype=torch.float64), 0.2)
+
+    def test_unit_ball_field_preserves_physical_coordinates(self):
+        core = _SpectralMLP(
+            2,
+            (),
+            3.0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+        with torch.no_grad():
+            core.weights[0].copy_(torch.tensor([[-0.5, 0.0], [0.0, -0.25]]))
+            core.biases[0].copy_(torch.tensor([0.1, -0.2], dtype=torch.float64))
+        field = _UnitBallField(core, radius=4.0)
+        states = torch.tensor([[2.0, -4.0], [-1.0, 3.0]], dtype=torch.float64)
+
+        torch.testing.assert_close(field(states), 4.0 * core(states / 4.0))
+        torch.testing.assert_close(field.normalized(states / 4.0), core(states / 4.0))
+        self.assertEqual(field.configuration()["coordinate_normalization"], "unit-ball")
+        self.assertEqual(field.effective_lipschitz_bound(), core.effective_lipschitz_bound())
+
+        field.eval()
+        field(states)
+        zero_state = {name: torch.zeros_like(value) for name, value in field.state_dict().items()}
+        field.load_state_dict(zero_state)
+        torch.testing.assert_close(field(states), torch.zeros_like(states))
 
 
 if __name__ == "__main__":
