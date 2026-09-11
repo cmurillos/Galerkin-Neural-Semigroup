@@ -2,28 +2,15 @@
 
 from math import isclose
 from pathlib import Path
-from time import perf_counter
 
 import torch
 
-from ._loss import adaptive_field_score, component_weights, field_loss_terms
 from ._network import _SpectralMLP
-from ._sampling import (
-    adaptive_refinement,
-    canonical_directions,
-    initial_radial_layers,
-    radial_design,
-    radial_error_profile,
-    radial_interval_probe,
-    reference_targets,
-    reference_targets_and_jacobians,
-    values_and_full_jacobian,
-)
+from ._sampling import reference_targets, sample_ball, sampling_mode
 from ._validation import (
     compute_device,
     floating_dtype,
     hidden_widths,
-    nonnegative_real,
     positive_integer,
     positive_real,
 )
@@ -49,108 +36,35 @@ def _generator(device, seed):
     return result
 
 
-def _field_values_and_jacobian(field, states, directions):
-    return values_and_full_jacobian(field, states, directions)
+def _field_loss(prediction, target):
+    """Return the direct squared Euclidean field-matching loss."""
+    return (prediction - target).square().sum(dim=-1).mean()
 
 
-def _mean_losses(
-    field,
-    states,
-    targets,
-    directions,
-    target_jacobians,
-    batch_size,
-    *,
-    weights,
-    jacobian_weight,
-):
-    totals = {"loss": 0.0, "value_loss": 0.0, "jacobian_loss": 0.0}
-    with torch.no_grad():
-        for start in range(0, len(states), batch_size):
-            target = targets[start : start + batch_size]
-            prediction, prediction_jacobian = _field_values_and_jacobian(
-                field,
-                states[start : start + batch_size],
-                directions,
-            )
-            value, jacobian = field_loss_terms(
-                prediction,
-                target,
-                prediction_jacobian,
-                target_jacobians[start : start + batch_size],
-                weights=weights,
-            )
-            totals["value_loss"] += float(value.sum().item())
-            totals["jacobian_loss"] += float(jacobian.sum().item())
-            totals["loss"] += float((value + jacobian_weight * jacobian).sum().item())
-    return {name: value / len(states) for name, value in totals.items()}
-
-
-def _mean_value_loss(field, states, targets, batch_size, *, weights):
+def _mean_loss(field, states, targets, batch_size):
     total = 0.0
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
+            state = states[start : start + batch_size]
             target = targets[start : start + batch_size]
-            prediction = field(states[start : start + batch_size])
-            total += float(adaptive_field_score(prediction, target, weights=weights).sum().item())
-    return total / len(states)
-
-
-def _refinement_scores(
-    field,
-    states,
-    targets,
-    batch_size,
-    *,
-    weights,
-):
-    scores = []
-    with torch.no_grad():
-        for start in range(0, len(states), batch_size):
-            target = targets[start : start + batch_size]
-            prediction = field(states[start : start + batch_size])
-            scores.append(
-                adaptive_field_score(
-                    prediction,
+            total += float(
+                _field_loss(
+                    field(state),
                     target,
-                    weights=weights,
-                )
+                ).item()
+                * len(state)
             )
-    return torch.cat(scores)
-
-
-def _upper_quantile(values, probability=0.99):
-    return float(torch.quantile(values, probability).item())
-
-
-def _epoch_order(count, recent_start, emphasize_recent, *, generator, device):
-    if not emphasize_recent or recent_start >= count:
-        return torch.randperm(count, generator=generator, device=device)
-    recent_count = count - recent_start
-    recent = recent_start + torch.randint(
-        recent_count,
-        (count // 2,),
-        generator=generator,
-        device=device,
-    )
-    complete = torch.randint(
-        count,
-        (count - len(recent),),
-        generator=generator,
-        device=device,
-    )
-    order = torch.cat((recent, complete))
-    return order[torch.randperm(count, generator=generator, device=device)]
+    return total / len(states)
 
 
 class NeuralSemigroupProblem:
     """Define and train the method without exposing the Galerkin target field.
 
-    The normal route receives an operational ``ngfield`` basis, a complete weak
+    The normal route receives an operational ngfield basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
-    restrictions are already carried by the basis. The concentric radial design,
-    adaptive radial refinement rule, tanh MLP, component-balanced Sobolev loss and exact
-    spectral projection are fixed by the method.
+    restrictions are already carried by the basis. The user selects one of two
+    fixed vectorized sampling measures. The tanh MLP, direct field loss and exact
+    spectral projection remain fixed by the method.
     """
 
     def __init__(
@@ -219,46 +133,23 @@ class NeuralSemigroupProblem:
         hidden,
         lipschitz,
         samples=10_000,
+        sampling="volume",
         batch_size=256,
         epochs=1_000,
-        max_epochs=None,
-        tolerance=None,
-        max_time=None,
-        refine_every=None,
-        refine_samples=512,
-        candidate_samples=32_768,
-        patience=100,
         lr=1e-3,
-        jacobian_weight=0.1,
-        balance_epsilon=1e-6,
         seed=0,
         device="auto",
         dtype=None,
         verbose=False,
     ):
-        """Train the fixed neural field, optionally refining difficult regions."""
+        """Train with direct field matching on one fixed sampling measure."""
         hidden = hidden_widths(hidden)
         lipschitz = positive_real(lipschitz, "lipschitz")
         samples = positive_integer(samples, "samples", minimum=2)
+        sampling = sampling_mode(sampling)
         batch_size = min(positive_integer(batch_size, "batch_size"), samples)
         epochs = positive_integer(epochs, "epochs")
-        if max_epochs is None:
-            max_epochs = epochs
-        max_epochs = positive_integer(max_epochs, "max_epochs")
-        if max_epochs < epochs:
-            raise ValueError("max_epochs must be greater than or equal to epochs.")
-        if tolerance is not None:
-            tolerance = positive_real(tolerance, "tolerance")
-        if max_time is not None:
-            max_time = positive_real(max_time, "max_time")
-        if refine_every is not None:
-            refine_every = positive_integer(refine_every, "refine_every")
-        refine_samples = positive_integer(refine_samples, "refine_samples")
-        candidate_samples = positive_integer(candidate_samples, "candidate_samples", minimum=2)
-        patience = positive_integer(patience, "patience")
         lr = positive_real(lr, "lr")
-        jacobian_weight = nonnegative_real(jacobian_weight, "jacobian_weight")
-        balance_epsilon = positive_real(balance_epsilon, "balance_epsilon")
         seed = positive_integer(seed, "seed", minimum=0)
         if not isinstance(verbose, bool):
             raise TypeError("verbose must be a boolean.")
@@ -273,41 +164,28 @@ class NeuralSemigroupProblem:
         if coordinate_system.dimension != self.dimension:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
 
-        radial_layers = initial_radial_layers(
+        validation_samples = max(1, min(4096, samples // 10))
+        train_states = sample_ball(
             samples,
             self.dimension,
             self.radius,
-            device=device,
-            dtype=dtype,
-        )
-        initial_layer_count = len(radial_layers)
-        train_states, _ = radial_design(
-            samples,
-            self.dimension,
-            radial_layers,
+            sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
         )
-        validation_samples = max(initial_layer_count - 1, min(4096, samples // 10))
-        validation_states, _ = radial_interval_probe(
+        validation_states = sample_ball(
             validation_samples,
             self.dimension,
-            radial_layers,
+            self.radius,
+            sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
         )
-        jacobian_basis = canonical_directions(
-            self.dimension,
-            self.radius,
-            device=device,
-            dtype=dtype,
-        )
-        train_targets, train_target_jacobians = reference_targets_and_jacobians(
+        train_targets = reference_targets(
             coordinate_system,
             train_states,
-            radius=self.radius,
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
@@ -317,35 +195,6 @@ class NeuralSemigroupProblem:
             time_scale=self.time_scale,
             batch_size=batch_size,
         )
-        jacobian_audit_samples = min(64, validation_samples)
-        _, validation_target_jacobians = reference_targets_and_jacobians(
-            coordinate_system,
-            validation_states[:jacobian_audit_samples],
-            radius=self.radius,
-            time_scale=self.time_scale,
-            batch_size=batch_size,
-        )
-        component_rms = train_targets.square().mean(dim=0).sqrt()
-        weights = component_weights(train_targets, epsilon=balance_epsilon)
-        candidates = None
-        candidate_targets = None
-        candidate_interval_indices = None
-        if refine_every is not None or tolerance is not None:
-            effective_candidate_samples = max(candidate_samples, len(radial_layers) - 1)
-            candidates, candidate_interval_indices = radial_interval_probe(
-                effective_candidate_samples,
-                self.dimension,
-                radial_layers,
-                generator=generator,
-                device=device,
-                dtype=dtype,
-            )
-            candidate_targets = reference_targets(
-                coordinate_system,
-                candidates,
-                time_scale=self.time_scale,
-                batch_size=batch_size,
-            )
 
         field = _SpectralMLP(
             self.dimension,
@@ -357,351 +206,68 @@ class NeuralSemigroupProblem:
         optimizer = torch.optim.Adam(field.parameters(), lr=lr)
         training_losses = []
         validation_losses = []
-        training_value_losses = []
-        validation_value_losses = []
-        training_jacobian_losses = []
-        validation_jacobian_losses = []
-        validation_jacobian_audits = []
-        candidate_checks = []
-        refinement_events = []
         best_loss = float("inf")
-        best_candidate_q99 = None
         best_epoch = 0
         best_state = None
-        report_every = max(1, max_epochs // 10)
-        stage_best = float("inf")
-        stale_epochs = 0
-        stalled_checks = 0
-        recent_start = len(train_states)
-        emphasize_until = 0
-        completed_epochs = 0
-        stop_reason = "max_epochs"
-        started_at = perf_counter()
+        report_every = max(1, epochs // 10)
 
-        for epoch in range(max_epochs):
+        for epoch in range(epochs):
             field.train()
-            training_count = len(train_states)
-            order = _epoch_order(
-                training_count,
-                recent_start,
-                epoch < emphasize_until,
-                generator=generator,
-                device=device,
-            )
-            epoch_totals = {"loss": 0.0, "value_loss": 0.0, "jacobian_loss": 0.0}
-            for start in range(0, training_count, batch_size):
+            order = torch.randperm(samples, generator=generator, device=device)
+            epoch_loss = 0.0
+            for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
-                prediction, prediction_jacobian = _field_values_and_jacobian(
-                    field,
-                    train_states[indices],
-                    jacobian_basis,
+                loss = _field_loss(
+                    field(train_states[indices]),
+                    train_targets[indices],
                 )
-                target = train_targets[indices]
-                value, jacobian = field_loss_terms(
-                    prediction,
-                    target,
-                    prediction_jacobian,
-                    train_target_jacobians[indices],
-                    weights=weights,
-                )
-                loss = (value + jacobian_weight * jacobian).mean()
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Training produced a nonfinite loss.")
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-                count = len(indices)
-                epoch_totals["loss"] += float(loss.detach().item()) * count
-                epoch_totals["value_loss"] += float(value.detach().sum().item())
-                epoch_totals["jacobian_loss"] += float(jacobian.detach().sum().item())
-            epoch_metrics = {name: value / training_count for name, value in epoch_totals.items()}
+                epoch_loss += float(loss.detach().item()) * len(indices)
+            epoch_loss /= samples
             field.eval()
-            validation_value = _mean_value_loss(
+            validation_loss = _mean_loss(
                 field,
                 validation_states,
                 validation_targets,
                 batch_size,
-                weights=weights,
             )
-            completed_epochs = epoch + 1
-            validation_jacobian = None
-            audit_due = completed_epochs == 1 or completed_epochs % report_every == 0
-            if audit_due:
-                audit = _mean_losses(
-                    field,
-                    validation_states[:jacobian_audit_samples],
-                    validation_targets[:jacobian_audit_samples],
-                    jacobian_basis,
-                    validation_target_jacobians,
-                    batch_size,
-                    weights=weights,
-                    jacobian_weight=jacobian_weight,
-                )
-                validation_jacobian = audit["jacobian_loss"]
-                validation_jacobian_audits.append(
-                    {"epoch": completed_epochs, "jacobian_loss": validation_jacobian}
-                )
-            training_losses.append(epoch_metrics["loss"])
-            validation_losses.append(validation_value)
-            training_value_losses.append(epoch_metrics["value_loss"])
-            validation_value_losses.append(validation_value)
-            training_jacobian_losses.append(epoch_metrics["jacobian_loss"])
-            validation_jacobian_losses.append(validation_jacobian)
-            if best_candidate_q99 is None and validation_value < best_loss:
-                best_loss = validation_value
+            training_losses.append(epoch_loss)
+            validation_losses.append(validation_loss)
+            if validation_loss < best_loss:
+                best_loss = validation_loss
                 best_epoch = epoch
                 best_state = {
                     name: value.detach().clone() for name, value in field.state_dict().items()
                 }
-            if validation_value < stage_best * (1 - 1e-3):
-                stage_best = validation_value
-                stale_epochs = 0
-            else:
-                stale_epochs += 1
             if verbose and ((epoch + 1) % report_every == 0 or epoch == 0):
                 print(
-                    f"epoch={epoch + 1}/{max_epochs} "
-                    f"train={epoch_metrics['loss']:.6e} "
-                    f"validation={validation_value:.6e} "
-                    f"samples={training_count}"
+                    f"epoch={epoch + 1}/{epochs} "
+                    f"train={epoch_loss:.6e} validation={validation_loss:.6e}"
                 )
-
-            elapsed = perf_counter() - started_at
-            if max_time is not None and elapsed >= max_time:
-                stop_reason = "max_time"
-                break
-
-            refinement_check_due = refine_every is not None and completed_epochs % refine_every == 0
-            refinement_due = (
-                refinement_check_due and stale_epochs >= patience and completed_epochs < max_epochs
-            )
-            accuracy_due = (
-                tolerance is not None
-                and completed_epochs >= epochs
-                and (
-                    completed_epochs == epochs or completed_epochs % (refine_every or patience) == 0
-                )
-            )
-            if not (refinement_check_due or accuracy_due):
-                continue
-
-            candidate_scores = _refinement_scores(
-                field,
-                candidates,
-                candidate_targets,
-                batch_size,
-                weights=weights,
-            )
-            candidate_q99 = _upper_quantile(candidate_scores)
-            candidate_radial_errors = radial_error_profile(
-                candidate_scores,
-                candidate_interval_indices,
-                0.5 * (radial_layers[:-1] + radial_layers[1:]),
-            )
-            if best_candidate_q99 is None or candidate_q99 < best_candidate_q99:
-                best_candidate_q99 = candidate_q99
-                best_loss = validation_value
-                best_epoch = epoch
-                best_state = {
-                    name: value.detach().clone() for name, value in field.state_dict().items()
-                }
-            check = {
-                "epoch": completed_epochs,
-                "candidate_q99_loss": candidate_q99,
-                "radial_profile": [
-                    {"radius": float(radius.item()), "mean_loss": float(error.item())}
-                    for radius, error in zip(
-                        0.5 * (radial_layers[:-1] + radial_layers[1:]),
-                        candidate_radial_errors,
-                        strict=True,
-                    )
-                ],
-            }
-
-            if max_time is not None and perf_counter() - started_at >= max_time:
-                candidate_checks.append(check)
-                stop_reason = "max_time"
-                break
-
-            if tolerance is not None and completed_epochs >= epochs and candidate_q99 <= tolerance:
-                candidate_checks.append(check)
-                stop_reason = "tolerance"
-                break
-
-            if not refinement_due:
-                candidate_checks.append(check)
-                continue
-
-            training_scores = _refinement_scores(
-                field,
-                train_states,
-                train_targets,
-                batch_size,
-                weights=weights,
-            )
-            training_q99 = _upper_quantile(training_scores)
-            check["training_q99_loss"] = training_q99
-            coverage_gap = candidate_q99 > 1.25 * max(
-                training_q99,
-                torch.finfo(dtype).eps,
-            )
-            check["coverage_gap"] = coverage_gap
-            candidate_checks.append(check)
-
-            needs_refinement = tolerance is None or candidate_q99 > tolerance
-            if coverage_gap and needs_refinement:
-                new_states, new_radius, radial_errors, interval_index = adaptive_refinement(
-                    candidates,
-                    candidate_scores,
-                    candidate_interval_indices,
-                    radial_layers,
-                    refine_samples,
-                    generator=generator,
-                )
-                new_targets, new_target_jacobians = reference_targets_and_jacobians(
-                    coordinate_system,
-                    new_states,
-                    radius=self.radius,
-                    time_scale=self.time_scale,
-                    batch_size=batch_size,
-                )
-                recent_start = len(train_states)
-                train_states = torch.cat((train_states, new_states), dim=0)
-                train_targets = torch.cat((train_targets, new_targets), dim=0)
-                train_target_jacobians = torch.cat(
-                    (train_target_jacobians, new_target_jacobians), dim=0
-                )
-                lower_radius = float(radial_layers[interval_index].item())
-                upper_radius = float(radial_layers[interval_index + 1].item())
-                interval_error = float(radial_errors[interval_index].item())
-                radial_layers = torch.cat(
-                    (
-                        radial_layers[: interval_index + 1],
-                        new_radius.reshape(1),
-                        radial_layers[interval_index + 1 :],
-                    )
-                )
-                effective_candidate_samples = max(candidate_samples, len(radial_layers) - 1)
-                candidates, candidate_interval_indices = radial_interval_probe(
-                    effective_candidate_samples,
-                    self.dimension,
-                    radial_layers,
-                    generator=generator,
-                    device=device,
-                    dtype=dtype,
-                )
-                candidate_targets = reference_targets(
-                    coordinate_system,
-                    candidates,
-                    time_scale=self.time_scale,
-                    batch_size=batch_size,
-                )
-                emphasize_until = completed_epochs + max(1, min(patience, refine_every) // 2)
-                refinement_events.append(
-                    {
-                        "epoch": completed_epochs,
-                        "added_samples": len(new_states),
-                        "training_samples": len(train_states),
-                        "candidate_q99_loss": candidate_q99,
-                        "training_q99_loss": training_q99,
-                        "lower_radius": lower_radius,
-                        "upper_radius": upper_radius,
-                        "new_radius": float(new_radius.item()),
-                        "interval_mean_loss": interval_error,
-                        "radial_layers": len(radial_layers),
-                    }
-                )
-                best_loss = float("inf")
-                best_candidate_q99 = None
-                best_epoch = epoch
-                best_state = {
-                    name: value.detach().clone() for name, value in field.state_dict().items()
-                }
-                stage_best = float("inf")
-                stale_epochs = 0
-                stalled_checks = 0
-                if verbose:
-                    print(
-                        f"refinement epoch={completed_epochs} "
-                        f"added={len(new_states)} "
-                        f"radius={float(new_radius.item()):.6e} "
-                        f"candidate_q99={candidate_q99:.6e}"
-                    )
-            else:
-                stalled_checks += 1
-                if completed_epochs >= epochs and stalled_checks >= 2:
-                    stop_reason = "stalled"
-                    break
 
         field.load_state_dict(best_state)
         field.eval()
-        elapsed_time = perf_counter() - started_at
-        final_training = _mean_losses(
-            field,
-            train_states,
-            train_targets,
-            jacobian_basis,
-            train_target_jacobians,
-            batch_size,
-            weights=weights,
-            jacobian_weight=jacobian_weight,
-        )
-        final_validation_value = _mean_value_loss(
-            field,
-            validation_states,
-            validation_targets,
-            batch_size,
-            weights=weights,
-        )
-        final_validation_audit = _mean_losses(
-            field,
-            validation_states[:jacobian_audit_samples],
-            validation_targets[:jacobian_audit_samples],
-            jacobian_basis,
-            validation_target_jacobians,
-            batch_size,
-            weights=weights,
-            jacobian_weight=jacobian_weight,
-        )
-        candidate_q99_loss = None
-        if candidates is not None:
-            final_candidate_scores = _refinement_scores(
-                field,
-                candidates,
-                candidate_targets,
-                batch_size,
-                weights=weights,
-            )
-            candidate_q99_loss = _upper_quantile(final_candidate_scores)
+        final_training_loss = _mean_loss(field, train_states, train_targets, batch_size)
         norms = field.spectral_norms()
         history = {
             "training_loss": training_losses,
             "validation_loss": validation_losses,
-            "training_value_loss": training_value_losses,
-            "validation_value_loss": validation_value_losses,
-            "training_jacobian_loss": training_jacobian_losses,
-            "validation_jacobian_loss": validation_jacobian_losses,
-            "validation_jacobian_audits": validation_jacobian_audits,
-            "candidate_checks": candidate_checks,
-            "refinements": refinement_events,
         }
         metrics = {
             "best_epoch": best_epoch + 1,
-            "epochs_completed": completed_epochs,
-            "stop_reason": stop_reason,
-            "elapsed_time": elapsed_time,
-            "training_samples": len(train_states),
-            "refinements": len(refinement_events),
-            "candidate_q99_loss": candidate_q99_loss,
-            "training_loss": final_training["loss"],
-            "validation_loss": final_validation_value,
-            "training_value_loss": final_training["value_loss"],
-            "validation_value_loss": final_validation_value,
-            "training_jacobian_loss": final_training["jacobian_loss"],
-            "validation_jacobian_loss": final_validation_audit["jacobian_loss"],
+            "training_loss": final_training_loss,
+            "validation_loss": best_loss,
             "effective_lipschitz_bound": field.effective_lipschitz_bound(),
             "layer_spectral_norms": norms,
         }
+        measure = {
+            "volume": "normalized-volume-ball",
+            "radius": "uniform-radius-ball",
+        }[sampling]
         metadata = {
             "basis": _basis_signature(self.basis),
             "reference": {
@@ -713,53 +279,22 @@ class NeuralSemigroupProblem:
                 "orthonormality_error": coordinate_system.orthonormality_error,
             },
             "method": {
-                "measure": (
-                    "adaptive-concentric-radial-layers"
-                    if refine_every is not None
-                    else "concentric-radial-layers"
-                ),
+                "measure": measure,
                 "activation": "tanh",
                 "spectral_projection": "exact",
-                "loss": "component-balanced-sobolev-full-jacobian",
-                "validation_objective": "component-balanced-field-values",
+                "loss": "mean-squared-euclidean-field-error",
                 "autonomous": True,
             },
             "training": {
                 "samples": samples,
-                "final_samples": len(train_states),
                 "validation_samples": validation_samples,
+                "sampling": sampling,
                 "batch_size": batch_size,
                 "epochs": epochs,
-                "minimum_epochs": epochs,
-                "max_epochs": max_epochs,
-                "epochs_completed": completed_epochs,
-                "tolerance": tolerance,
-                "max_time": max_time,
-                "refine_every": refine_every,
-                "refine_samples": refine_samples,
-                "candidate_samples": candidate_samples,
-                "effective_candidate_samples": (
-                    max(candidate_samples, len(radial_layers) - 1)
-                    if candidates is not None
-                    else None
-                ),
-                "patience": patience,
-                "initial_radial_layers": initial_layer_count,
-                "final_radial_layers": len(radial_layers),
-                "radial_layer_values": radial_layers.tolist(),
-                "radial_error": "mean-component-balanced-value-loss",
-                "radial_interval_rule": "largest-midpoint-shell-mean",
                 "lr": lr,
-                "jacobian_weight": jacobian_weight,
-                "balance_epsilon": balance_epsilon,
-                "component_rms": component_rms.tolist(),
-                "jacobian_probe": "complete-radius-scaled-canonical-basis",
-                "jacobian_directions": self.dimension,
-                "jacobian_audit_samples": jacobian_audit_samples,
-                "jacobian_audit_every": report_every,
                 "seed": seed,
                 "optimizer": "Adam",
-                "target_mode": ("cached-and-appended" if refinement_events else "cached"),
+                "target_mode": "cached",
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),

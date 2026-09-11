@@ -30,73 +30,38 @@ an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
 The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
 `GalerkinProblem` workflows. Neither route returns the numerical reference field.
 
-## D-002 — Radial design and component-balanced Sobolev objective
+## D-002 — Two fixed learning measures and direct objective
 
-For `m` initial states in dimension `N`, the method fixes
-
-```text
-L = min(m, max(2, min(32, round(sqrt(m/N)))))
-
-r_l = l R0/(L-1),  l = 0, ..., L-1.
-```
-
-It retains `z=0` once. The other states are distributed as evenly as possible over the
-positive radii. At each such radius it draws an independent standard Gaussian `xi`,
-normalizes it, and sets
+Training states lie in
 
 ```text
-u = xi/||xi||_2,    z = r_l u.
+B_N(R0) = {z in R^N : ||z||_2 < R0}.
 ```
 
-Thus angular samples are uniform on the unit sphere, the origin and boundary are both
-represented, and the radial design does not acquire the high-dimensional concentration
-near `R0` of normalized Lebesgue volume. Independent validation uses new directions on
-the midpoint shell of every initial adjacent-layer interval.
-
-Let `Y = tau * G(Z)` be the cached scaled Galerkin target. Component scales are computed
-once from the initial training design and remain fixed after adaptive refinements:
+For a standard Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation
+offers exactly two fixed, non-adaptive measures:
 
 ```text
-s_j^2 = mean_i Y_j(Z_i)^2,
-
-W = diag((s_j^2 + epsilon * mean_k s_k^2)^(-1/2)).
+sampling="volume": z = R0 * s^(1/N) * xi / ||xi||_2,
+sampling="radius": z = R0 * s       * xi / ||xi||_2.
 ```
 
-If the reference field is identically zero, `W` is the identity. Thus `epsilon > 0` is
-a relative floor rather than a dimensional constant, and global changes of target scale
-do not alter the balance between components.
+The first is normalized Lebesgue volume on the ball. The second is the product of the
+uniform radial measure on `(0,R0)` and uniform angular measure on the unit sphere.
+Directions, radii and state tensors are generated vectorially. Training and validation
+states are drawn once from independent samples of the same selected measure. Epochs
+shuffle the fixed training tensor; they neither resample it nor change its distribution.
 
-Every state receives the complete canonical basis `e_1, ..., e_N`. The directions
-`V_k = R0 * e_k` express derivatives in unit-ball coordinates without changing the
-public state coordinates. Numerical Galerkin Field supplies all columns
-`J_Y(Z)V_k = tau * J_G(Z)V_k` through forward-mode automatic differentiation. Thus
-`K=N` at every training state and no random projection of the Jacobian remains.
-
-For `lambda_J >= 0`, the per-state terms are
+For `Y = tau * G(Z)`, the sole empirical objective is the batch mean of the squared
+Euclidean field difference:
 
 ```text
-L_value = mean_j [W(F(Z)-Y)]_j^2,
-
-L_jacobian = mean_(j,k) [W(J_F(Z)-J_Y(Z)) R0]_(j,k)^2,
-
-L = L_value + lambda_J * L_jacobian.
+L_B(theta) = ||F_theta(Z) - Y||_F^2 / B.
 ```
 
-The inverse-RMS matrix prevents large target components from determining the entire fit.
-The derivative term supervises the complete first-order variation at every training
-state. Values and full Jacobian targets are evaluated in batches, detached from autograd
-and cached. Independent validation values use the same fixed component weights and are
-the sole checkpoint-selection, plateau and stopping objective. A complete-Jacobian audit
-on a small validation subset is computed periodically for diagnosis but never selects
-the returned model.
-
-Adaptive refinement, when requested, does not replace this objective. It changes the
-empirical design by appending states in regions where the current field has a persistent
-coverage error. Its independent selection score is the per-state value loss:
-
-```text
-eta(z) = L_value(z).
-```
+It sums rather than averages over the coordinate dimension. Galerkin targets are
+evaluated in vectorized batches, detached from autograd and cached. There is no relative,
+angular, derivative, Jacobian or adaptive-refinement term.
 
 ## D-003 — Fixed neural architecture
 
@@ -144,68 +109,22 @@ problem.train(
     hidden=...,
     lipschitz=...,
     samples=...,
+    sampling="volume",  # or "radius"
     batch_size=...,
     epochs=...,
-    max_epochs=None,
-    tolerance=None,
-    max_time=None,
-    refine_every=None,
-    refine_samples=512,
-    candidate_samples=32768,
-    patience=100,
     lr=...,
-    jacobian_weight=0.1,
-    balance_epsilon=1e-6,
     seed=...,
 )
 ```
 
-Adam, the complete radius-scaled canonical basis, validation sampling and cached targets
-are currently fixed. `jacobian_weight` is nonnegative and `balance_epsilon` is strictly
-positive. Device selection defaults to CUDA when available and otherwise CPU. Computation
-uses float64 by default; `device` and `dtype` are explicit advanced overrides because they
-affect reproducibility.
+Adam, the direct field loss and cached targets are fixed. `sampling` selects one of the
+two measures in D-002 and does not change during training. Device selection defaults to
+CUDA when available and otherwise CPU. Computation uses float64 by default; `device`
+and `dtype` are explicit advanced overrides because they affect reproducibility.
 
-`epochs` is the minimum budget whenever `max_epochs` is larger; omitting `max_epochs`
-recovers the previous exact epoch budget. `max_time` is a hard wall-clock budget in
-seconds, checked after each epoch. After the minimum budget, `tolerance` accepts the fit
-when the 99th percentile of the independent refinement score is below the requested
-level. Two unsuccessful plateau checks terminate with `stop_reason="stalled"`.
-
-Setting `refine_every` enables refinement checks at that epoch interval. A check is
-eligible only after `patience` epochs without a relative validation improvement of
-`1e-3`. The independent candidate design uses new unit-sphere directions distributed
-over the midpoint shell of every current adjacent-layer interval. If `I_l` indexes
-candidates on `rho_l = (r_l+r_(l+1))/2`, its radial error profile is
-
-```text
-E_l = mean_(i in I_l) eta(z_i),
-```
-
-The method chooses an index in `argmax_l E_l` and inserts `refine_samples` new states on
-the spherical layer of radius
-
-```text
-r_new = (r_l + r_(l+1))/2.
-```
-
-Choosing the largest, rather than smallest, interval error is essential: the added
-layer must increase resolution where the learned field is least accurate between
-existing layers. Refinement still occurs only when the candidate 99th percentile is at
-least 25% larger than its training counterpart; this separates a coverage deficit from
-an optimization or
-capacity deficit. The independent probe is rebuilt over the enlarged ordered layer set.
-For half of the following adaptation window, half of each epoch design is drawn from the
-newly appended states. Candidate history records `(radius, E_l)` for every check, and a
-refinement event records the selected interval and its midpoint.
-
-Without an independent probe, the returned weights minimize validation value loss. With
-tolerance or adaptive refinement enabled, they minimize the probe's 99th-percentile
-value score in the latest adaptive stage. All epochs are retained in
-`semigroup.history`. Total and component training histories, value-validation history,
-periodic Jacobian audits, candidate checks and refinement events are reported separately,
-together with the stop reason, elapsed time, final sample count, component scales, layer
-spectral norms and their product.
+The returned weights are those with minimum independent validation loss. All epochs are
+retained in `semigroup.history`; final metrics include the layer spectral norms and their
+product.
 
 ## D-006 — Flow and numerical integration
 
@@ -236,11 +155,9 @@ supplying the same ordered operational basis; a stronger content hash is future 
 
 ## D-008 — Scope
 
-- Training controls a field only on a finite radial design inside the reduced ball; the
+- Training controls a field only through a finite sample from the selected measure; the
   ball is not asserted to be positively invariant.
-- A small empirical loss or probe quantile is not a certified uniform error.
-- Adaptive refinement resolves radial variation but can only discover angular errors
-  represented by its finite unit-sphere probe.
+- A small empirical loss is not a certified uniform error.
 - Exact spectral projection guarantees global well-posedness of the learned ODE but does
   not establish convergence to the original infinite-dimensional evolution.
 - Explicit integration may be expensive for stiff reduced dynamics.

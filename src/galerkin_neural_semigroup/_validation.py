@@ -25,15 +25,6 @@ def positive_real(value, name):
     return result
 
 
-def nonnegative_real(value, name):
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError(f"{name} must be a nonnegative real number.")
-    result = float(value)
-    if not isfinite(result) or result < 0:
-        raise ValueError(f"{name} must be a finite nonnegative real number.")
-    return result
-
-
 def hidden_widths(hidden):
     if isinstance(hidden, (str, bytes)) or not isinstance(hidden, (list, tuple)):
         raise TypeError("hidden must be a list or tuple of positive widths.")

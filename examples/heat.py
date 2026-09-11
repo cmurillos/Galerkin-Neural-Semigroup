@@ -26,11 +26,10 @@ def main():
         hidden=(64, 64),
         lipschitz=10.0,
         samples=4096,
+        sampling="volume",
         batch_size=256,
         epochs=500,
         lr=1e-3,
-        jacobian_weight=0.1,
-        balance_epsilon=1e-6,
         seed=0,
         verbose=True,
     )

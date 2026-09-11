@@ -10,10 +10,9 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 
 The network is a `tanh` multilayer perceptron with exact spectral projection. If its
 global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
-continuous flow satisfies identity and composition by construction. Training compares
-component-balanced field values and complete Jacobians on concentric radial layers; it
-does not generate reference trajectories. Optional adaptive refinement inserts a new
-spherical layer inside the adjacent radial interval with the largest measured error.
+continuous flow satisfies identity and composition by construction. Training directly
+matches the neural and Galerkin fields on one of two fixed samples of the reduced ball;
+it does not generate reference trajectories or field derivatives.
 
 This repository is early research software. The mathematical and numerical contracts
 are explicit, but empirical claims will be added only after dedicated experiments.
@@ -70,50 +69,34 @@ semigroup = problem.train(
     hidden=(64, 64),
     lipschitz=10.0,
     samples=10_000,
+    sampling="volume",
     batch_size=256,
     epochs=1_000,
-    max_epochs=5_000,
-    tolerance=1e-3,
-    max_time=900,
-    refine_every=200,
-    refine_samples=512,
-    candidate_samples=32_768,
-    patience=100,
     lr=1e-3,
-    jacobian_weight=0.1,
-    balance_epsilon=1e-6,
     seed=0,
 )
 ```
 
-`basis.dimension` determines both the input and output dimensions. The initial design
-uses equally spaced radii from `0` to `radius`; Gaussian directions are normalized to
-the unit sphere before each positive radius is applied. The origin is retained as a
-separate state. This concentric design, `tanh` activation, autonomous architecture,
-spectral projection and Adam optimizer are method decisions rather than user-facing
-objects. The loss balances every output component by its fixed inverse RMS scale on the
-initial design and combines field values with the complete radius-scaled Jacobian in all
-`N` canonical directions. `jacobian_weight` controls derivative supervision and
-`balance_epsilon` places a relative floor under components with very small reference
-energy. Independent value validation selects checkpoints and controls stopping; a small
-periodic full-Jacobian audit is reported only as a diagnostic.
+`basis.dimension` determines both the input and output dimensions. Sampling has exactly
+two fixed, non-adaptive options. If `U` is uniform on `(0,1)` and `xi` is a standard
+Gaussian direction, both are generated in one vectorized operation:
 
-`epochs` is the minimum training budget and `max_epochs` is its hard epoch limit. If
-`max_epochs` is omitted it equals `epochs`, preserving fixed-budget training. Training
-can also stop when the 99th percentile of the independent probe score reaches
-`tolerance`, when `max_time` seconds elapse, or when the fit remains stalled after the
-minimum budget. The best checkpoint is retained and `stop_reason` records the decision.
+| `sampling` | Radius | Measure |
+| --- | --- | --- |
+| `"volume"` | `R * U**(1/N)` | Normalized volume on the ball (default). |
+| `"radius"` | `R * U` | Uniform radius and uniform angle. |
 
-Setting `refine_every` enables adaptive sampling. Once validation has failed to improve
-for `patience` epochs, an independent probe measures the mean value error on a spherical
-shell halfway between every pair of current adjacent layers. The midpoint shell with
-the largest mean error defines the interval to refine. Refinement occurs only if the
-probe's 99th-percentile value error exceeds the corresponding training error by at least
-25%.
-`refine_samples` new unit-sphere directions are then placed at the interval midpoint,
-and later probes include that new layer. Field values and complete reference Jacobians
-at training states remain private and cached. `candidate_checks` records the complete
-radial error profile, while `refinements` records every inserted radius.
+In both cases `z = rho * xi / ||xi||`. Training and validation states are drawn once
+from independent samples of the selected measure and are not adapted or resampled.
+The only learning objective is
+
+```text
+mean_i ||F_theta(z_i) - time_scale * G(z_i)||_2^2.
+```
+
+It is evaluated over tensor batches, with no angular, relative, Jacobian or adaptive
+term. The `tanh` architecture, exact spectral projection and Adam optimizer remain
+fixed method decisions.
 
 ## Evolution and reconstruction
 
@@ -172,7 +155,7 @@ The stable surface is intentionally small:
 | Object or operation | Meaning |
 | --- | --- |
 | `NeuralSemigroupProblem(...)` | Basis, weak form and reduced training domain. |
-| `problem.train(...)` | Build private targets and fit the fixed neural architecture. |
+| `problem.train(...)` | Choose `volume` or `radius`, build targets and fit the field. |
 | `NeuralSemigroup` | Trained field together with its continuous-flow interface. |
 | `semigroup.field(z)` | Scaled learned autonomous field. |
 | `semigroup.velocity(z)` | Learned velocity in physical time. |

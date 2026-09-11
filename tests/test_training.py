@@ -1,16 +1,30 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import torch
 
 from galerkin_neural_semigroup import NeuralSemigroup
+from galerkin_neural_semigroup.problem import _field_loss
 
 from ._fixtures import heat_problem
 
 
 class TrainingTests(unittest.TestCase):
+    def test_direct_loss_is_mean_over_states_and_sum_over_components(self):
+        prediction = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0]],
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        target = torch.zeros_like(prediction)
+
+        loss = _field_loss(prediction, target)
+        loss.backward()
+
+        self.assertEqual(float(loss.item()), 15.0)
+        torch.testing.assert_close(prediction.grad, prediction.detach())
+
     def test_linear_training_reduces_independent_field_error(self):
         problem = heat_problem()
         semigroup = problem.train(
@@ -34,52 +48,37 @@ class TrainingTests(unittest.TestCase):
             2.0 * (1 + 1e-12),
         )
         self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
-        self.assertEqual(semigroup.metadata["training"]["jacobian_weight"], 0.1)
-        self.assertEqual(semigroup.metadata["training"]["balance_epsilon"], 1e-6)
-        self.assertEqual(
-            semigroup.metadata["training"]["jacobian_probe"],
-            "complete-radius-scaled-canonical-basis",
-        )
-        self.assertEqual(semigroup.metadata["training"]["jacobian_directions"], problem.dimension)
-        self.assertIn("quadrature_order", semigroup.metadata["reference"])
-        self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
-        self.assertEqual(
-            semigroup.metadata["method"]["measure"],
-            "concentric-radial-layers",
-        )
-        self.assertEqual(
-            semigroup.metadata["training"]["radial_layer_values"][0],
-            0.0,
-        )
-        self.assertEqual(
-            semigroup.metadata["training"]["radial_layer_values"][-1],
-            problem.radius,
-        )
+        self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
+        self.assertEqual(semigroup.metadata["method"]["measure"], "normalized-volume-ball")
         self.assertEqual(
             semigroup.metadata["method"]["loss"],
-            "component-balanced-sobolev-full-jacobian",
+            "mean-squared-euclidean-field-error",
         )
         self.assertEqual(
-            semigroup.metadata["method"]["validation_objective"],
-            "component-balanced-field-values",
+            set(semigroup.history),
+            {"training_loss", "validation_loss"},
         )
-        self.assertIn("training_value_loss", semigroup.history)
-        self.assertIn("validation_jacobian_loss", semigroup.history)
-        self.assertGreaterEqual(len(semigroup.history["validation_jacobian_audits"]), 1)
-        self.assertTrue(semigroup.metrics["validation_value_loss"] >= 0)
-        self.assertGreaterEqual(semigroup.metrics["validation_jacobian_loss"], 0)
-        self.assertAlmostEqual(
-            semigroup.metrics["validation_loss"],
-            semigroup.metrics["validation_value_loss"],
+        self.assertIn("quadrature_order", semigroup.metadata["reference"])
+        self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
+
+    def test_radius_sampling_trains_with_the_same_direct_loss(self):
+        semigroup = heat_problem().train(
+            hidden=(),
+            lipschitz=2.0,
+            samples=32,
+            sampling="radius",
+            batch_size=16,
+            epochs=2,
+            lr=1e-2,
+            seed=5,
+            device="cpu",
         )
-        self.assertAlmostEqual(
-            semigroup.metrics["training_loss"],
-            semigroup.metrics["training_value_loss"]
-            + 0.1 * semigroup.metrics["training_jacobian_loss"],
-        )
-        self.assertLess(
-            semigroup.metrics["validation_value_loss"],
-            semigroup.history["validation_value_loss"][0],
+
+        self.assertEqual(semigroup.metadata["training"]["sampling"], "radius")
+        self.assertEqual(semigroup.metadata["method"]["measure"], "uniform-radius-ball")
+        self.assertEqual(
+            semigroup.metadata["method"]["loss"],
+            "mean-squared-euclidean-field-error",
         )
 
     def test_checkpoint_round_trip_uses_same_problem(self):
@@ -122,71 +121,6 @@ class TrainingTests(unittest.TestCase):
             incompatible = heat_problem(radius=2.0)
             with self.assertRaisesRegex(ValueError, "radii"):
                 incompatible.load(path, device="cpu")
-
-    def test_tolerance_stops_only_after_minimum_epochs(self):
-        semigroup = heat_problem().train(
-            hidden=(),
-            lipschitz=2.0,
-            samples=16,
-            batch_size=8,
-            epochs=2,
-            max_epochs=6,
-            tolerance=1e12,
-            candidate_samples=16,
-            patience=1,
-            lr=1e-2,
-            seed=2,
-            device="cpu",
-        )
-
-        self.assertEqual(semigroup.metrics["stop_reason"], "tolerance")
-        self.assertEqual(semigroup.metrics["epochs_completed"], 2)
-        self.assertEqual(len(semigroup.history["candidate_checks"]), 1)
-
-    def test_plateau_with_coverage_gap_adds_adaptive_samples(self):
-        with patch(
-            "galerkin_neural_semigroup.problem._upper_quantile",
-            side_effect=[10.0, 10.0, 1.0, 5.0, 5.0],
-        ):
-            semigroup = heat_problem().train(
-                hidden=(),
-                lipschitz=2.0,
-                samples=16,
-                batch_size=8,
-                epochs=1,
-                max_epochs=3,
-                refine_every=1,
-                refine_samples=4,
-                candidate_samples=16,
-                patience=1,
-                lr=1e-12,
-                seed=3,
-                device="cpu",
-            )
-
-        self.assertEqual(semigroup.metrics["refinements"], 1)
-        self.assertEqual(semigroup.metrics["training_samples"], 20)
-        self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached-and-appended")
-        event = semigroup.history["refinements"][0]
-        self.assertAlmostEqual(
-            event["new_radius"],
-            0.5 * (event["lower_radius"] + event["upper_radius"]),
-        )
-        self.assertEqual(event["radial_layers"], 4)
-        self.assertEqual(len(semigroup.history["candidate_checks"][0]["radial_profile"]), 2)
-        self.assertEqual(
-            semigroup.metadata["training"]["radial_interval_rule"],
-            "largest-midpoint-shell-mean",
-        )
-
-    def test_max_epochs_cannot_precede_minimum_epochs(self):
-        with self.assertRaisesRegex(ValueError, "greater than or equal"):
-            heat_problem().train(
-                hidden=(),
-                lipschitz=2.0,
-                epochs=3,
-                max_epochs=2,
-            )
 
 
 if __name__ == "__main__":
