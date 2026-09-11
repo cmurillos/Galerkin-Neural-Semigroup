@@ -11,5 +11,7 @@
 - Normalize network coordinates to the unit ball while preserving the physical reduced
   API through `F(z) = R * F_hat(z/R)`.
 - Keep training non-adaptive and cache only Galerkin field values.
+- Remove repeated device synchronizations during training and Runge--Kutta stages,
+  preallocate cached targets and avoid parameter graphs during ordinary evaluation.
 - Add adaptive Dormand--Prince 5(4), fixed-step RK4 and composition diagnostics.
 - Add physical projection/reconstruction and checkpoint round trips.

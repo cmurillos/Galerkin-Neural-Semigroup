@@ -61,6 +61,7 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertEqual(semigroup.metadata["method"]["loss_coordinates"], "unit-ball")
         self.assertEqual(semigroup.metadata["training"]["network_radius"], 1.0)
+        self.assertTrue(all(parameter.grad is None for parameter in semigroup.field.parameters()))
         states = torch.randn(5, problem.dimension, dtype=semigroup.dtype)
         torch.testing.assert_close(
             semigroup.field(states),

@@ -33,7 +33,7 @@ class NeuralSemigroup:
         metrics=None,
         metadata=None,
     ):
-        self.field = field
+        self.field = field.eval()
         self._coordinate_system = coordinate_system
         self.radius = float(radius)
         self.time_scale = float(time_scale)

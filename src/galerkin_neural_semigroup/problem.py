@@ -1,6 +1,6 @@
 """Compact public problem definition and private Galerkin supervision."""
 
-from math import isclose
+from math import isclose, isfinite
 from pathlib import Path
 
 import torch
@@ -42,19 +42,22 @@ def _field_loss(prediction, target):
 
 
 def _mean_loss(field, states, targets, batch_size):
-    total = 0.0
+    total = torch.zeros((), device=states.device, dtype=torch.float64)
     with torch.no_grad():
         for start in range(0, len(states), batch_size):
             state = states[start : start + batch_size]
             target = targets[start : start + batch_size]
-            total += float(
+            total.add_(
                 _field_loss(
                     field(state),
                     target,
-                ).item()
-                * len(state)
+                ),
+                alpha=len(state),
             )
-    return total / len(states)
+    result = float((total / len(states)).item())
+    if not isfinite(result):
+        raise FloatingPointError("Evaluation produced a nonfinite loss.")
+    return result
 
 
 class NeuralSemigroupProblem:
@@ -217,20 +220,20 @@ class NeuralSemigroupProblem:
         for epoch in range(epochs):
             field.train()
             order = torch.randperm(samples, generator=generator, device=device)
-            epoch_loss = 0.0
+            epoch_total = torch.zeros((), device=device, dtype=torch.float64)
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
                 loss = _field_loss(
                     field.normalized(train_unit_states[indices]),
                     train_targets[indices],
                 )
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Training produced a nonfinite loss.")
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.detach().item()) * len(indices)
-            epoch_loss /= samples
+                epoch_total.add_(loss.detach(), alpha=len(indices))
+            epoch_loss = float((epoch_total / samples).item())
+            if not isfinite(epoch_loss):
+                raise FloatingPointError("Training produced a nonfinite loss.")
             field.eval()
             validation_loss = _mean_loss(
                 field.normalized,
@@ -243,15 +246,21 @@ class NeuralSemigroupProblem:
             if validation_loss < best_loss:
                 best_loss = validation_loss
                 best_epoch = epoch
-                best_state = {
-                    name: value.detach().clone() for name, value in field.state_dict().items()
-                }
+                current_state = field.state_dict()
+                if best_state is None:
+                    best_state = {
+                        name: torch.empty_like(value) for name, value in current_state.items()
+                    }
+                with torch.no_grad():
+                    for name, value in current_state.items():
+                        best_state[name].copy_(value)
             if verbose and ((epoch + 1) % report_every == 0 or epoch == 0):
                 print(
                     f"epoch={epoch + 1}/{epochs} "
                     f"train={epoch_loss:.6e} validation={validation_loss:.6e}"
                 )
 
+        optimizer.zero_grad(set_to_none=True)
         field.load_state_dict(best_state)
         field.eval()
         final_training_loss = _mean_loss(

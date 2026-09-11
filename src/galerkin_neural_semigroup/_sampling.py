@@ -42,13 +42,15 @@ def sample_unit_ball(count, dimension, *, sampling, generator, device, dtype):
 @torch.no_grad()
 def unit_ball_targets(reference, states, *, radius, time_scale, batch_size):
     """Evaluate ``(time_scale / radius) * G(radius * x)`` in batches."""
-    outputs = []
+    outputs = torch.empty_like(states, requires_grad=False)
+    finite = torch.ones((), device=states.device, dtype=torch.bool)
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
         target = (time_scale / radius) * reference(radius * state)
         if target.shape != state.shape:
             raise ValueError("The internal reference evaluator changed the state shape.")
-        if not torch.isfinite(target).all():
-            raise FloatingPointError("The internal reference evaluator returned nonfinite data.")
-        outputs.append(target.detach())
-    return torch.cat(outputs, dim=0)
+        finite.logical_and_(torch.isfinite(target).all())
+        outputs[start : start + len(state)].copy_(target)
+    if not bool(finite.item()):
+        raise FloatingPointError("The internal reference evaluator returned nonfinite data.")
+    return outputs

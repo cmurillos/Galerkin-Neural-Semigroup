@@ -38,6 +38,7 @@ class FlowTests(unittest.TestCase):
         result = self.semigroup(state, 0.8, tolerance=1e-11)
         expected = state * torch.exp(torch.tensor(-0.2, dtype=torch.float64))
         torch.testing.assert_close(result, expected, atol=2e-10, rtol=2e-10)
+        self.assertFalse(result.requires_grad)
         recovered = self.semigroup(result, -0.8, tolerance=1e-11)
         torch.testing.assert_close(recovered, state, atol=4e-10, rtol=4e-10)
         torch.testing.assert_close(self.semigroup.velocity(state), -0.25 * state)
@@ -67,6 +68,19 @@ class FlowTests(unittest.TestCase):
         result = self.semigroup(state, 0.1, tolerance=1e-10)
         result.sum().backward()
         self.assertTrue(torch.isfinite(state.grad).all())
+
+    def test_fixed_solver_still_rejects_nonfinite_results(self):
+        core = self.semigroup.field.core
+        core.train()
+        with torch.no_grad():
+            core.weights[0].copy_(torch.eye(2, dtype=torch.float64))
+            core.biases[0].zero_()
+        self.semigroup.field.eval()
+        state = torch.full((2,), torch.finfo(torch.float64).max / 2, dtype=torch.float64)
+        times = torch.tensor([0.0, 1.0], dtype=torch.float64)
+
+        with self.assertRaisesRegex(FloatingPointError, "RK4"):
+            self.semigroup.solve(state, times, step=1.0)
 
 
 if __name__ == "__main__":

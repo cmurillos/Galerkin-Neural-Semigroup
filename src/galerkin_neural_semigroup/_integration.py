@@ -1,6 +1,6 @@
 """Explicit integration of autonomous reduced neural fields."""
 
-from math import ceil
+from math import ceil, isfinite
 
 import torch
 
@@ -10,11 +10,9 @@ _MAX_INTERNAL_STEPS = 1_000_000
 
 
 def _checked_field(field, state):
-    value = field(state)
+    value = field._forward_validated(state)
     if value.shape != state.shape:
         raise ValueError("The neural field changed the state shape during integration.")
-    if not torch.isfinite(value).all():
-        raise FloatingPointError("The neural field returned a nonfinite velocity.")
     return value
 
 
@@ -23,10 +21,7 @@ def _rk4_step(field, state, step):
     k2 = _checked_field(field, state + (step / 2) * k1)
     k3 = _checked_field(field, state + (step / 2) * k2)
     k4 = _checked_field(field, state + step * k3)
-    result = state + (step / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
-    if not torch.isfinite(result).all():
-        raise FloatingPointError("RK4 produced a nonfinite state.")
-    return result
+    return state + (step / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
 def _rk45_step(field, state, step):
@@ -61,8 +56,6 @@ def _rk45_step(field, state, step):
         + 187 * k6 / 2100
         + k7 / 40
     )
-    if not torch.isfinite(fifth).all() or not torch.isfinite(fourth).all():
-        raise FloatingPointError("RK45 produced a nonfinite state.")
     return fifth, fifth - fourth
 
 
@@ -73,6 +66,8 @@ def _fixed_interval(field, state, start, stop, maximum_step, budget):
     step = (stop - start) / count
     for _ in range(count):
         state = _rk4_step(field, state, step)
+    if not torch.isfinite(state).all():
+        raise FloatingPointError("RK4 produced a nonfinite state.")
     return state, count
 
 
@@ -91,6 +86,8 @@ def _adaptive_interval(field, state, start, stop, tolerance, budget):
         candidate, difference = _rk45_step(field, state, signed_step)
         scale = tolerance * (1 + torch.maximum(torch.abs(state), torch.abs(candidate)))
         error = float(torch.max(torch.abs(difference) / scale).detach().item())
+        if not isfinite(error):
+            raise FloatingPointError("RK45 produced a nonfinite state.")
         count += 1
         minimum = 16 * epsilon * max(1.0, abs(current), abs(stop))
         if error <= 1:

@@ -50,11 +50,30 @@ class SpectralMLPTests(unittest.TestCase):
             dtype=torch.float64,
         )
         field.eval()
-        first = field.effective_weights()
-        second = field.effective_weights()
-        self.assertIs(first, second)
+        first_weights = field.effective_weights()
+        first_biases = field.effective_biases()
+        self.assertIs(first_weights, field.effective_weights())
+        self.assertIs(first_biases, field.effective_biases())
         field.train()
         self.assertIsNone(field._evaluation_weights)
+        self.assertIsNone(field._evaluation_biases)
+
+    def test_evaluation_tracks_states_only_when_requested(self):
+        field = _SpectralMLP(
+            3,
+            (5,),
+            0.7,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        ).eval()
+
+        ordinary = torch.randn(4, 3, dtype=torch.float64)
+        self.assertFalse(field(ordinary).requires_grad)
+
+        differentiable = ordinary.clone().requires_grad_()
+        field(differentiable).sum().backward()
+        self.assertTrue(torch.isfinite(differentiable.grad).all())
+        self.assertTrue(all(parameter.grad is None for parameter in field.parameters()))
 
     def test_state_contract_is_strict(self):
         field = _SpectralMLP(

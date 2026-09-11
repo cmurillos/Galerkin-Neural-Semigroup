@@ -25,6 +25,7 @@ class _SpectralMLP(nn.Module):
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
         self._evaluation_weights = None
+        self._evaluation_biases = None
         for input_width, output_width in zip(widths[:-1], widths[1:]):
             weight = torch.empty(output_width, input_width, device=device, dtype=dtype)
             bias = torch.empty(output_width, device=device, dtype=dtype)
@@ -65,18 +66,29 @@ class _SpectralMLP(nn.Module):
             return self._evaluation_weights
         return tuple(self._project(weight) for weight in self.weights)
 
+    def effective_biases(self):
+        if not self.training:
+            if self._evaluation_biases is None:
+                self._evaluation_biases = tuple(bias.detach() for bias in self.biases)
+            return self._evaluation_biases
+        return tuple(self.biases)
+
+    def _clear_evaluation_cache(self):
+        self._evaluation_weights = None
+        self._evaluation_biases = None
+
     def train(self, mode=True):
         if not isinstance(mode, bool):
             raise TypeError("mode must be a boolean.")
-        self._evaluation_weights = None
+        self._clear_evaluation_cache()
         return super().train(mode)
 
     def _apply(self, function):
-        self._evaluation_weights = None
+        self._clear_evaluation_cache()
         return super()._apply(function)
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
-        self._evaluation_weights = None
+        self._clear_evaluation_cache()
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         return result
 
@@ -91,15 +103,19 @@ class _SpectralMLP(nn.Module):
     def effective_lipschitz_bound(self):
         return prod(self.spectral_norms())
 
-    def forward(self, states):
-        self._states(states)
+    def _forward_validated(self, states):
         value = states
-        effective = self.effective_weights()
-        for index, (weight, bias) in enumerate(zip(effective, self.biases)):
+        weights = self.effective_weights()
+        biases = self.effective_biases()
+        for index, (weight, bias) in enumerate(zip(weights, biases)):
             value = functional.linear(value, weight, bias)
             if index + 1 < self.depth:
                 value = torch.tanh(value)
         return value
+
+    def forward(self, states):
+        self._states(states)
+        return self._forward_validated(states)
 
     def configuration(self):
         return {
@@ -138,10 +154,13 @@ class _UnitBallField(nn.Module):
         """Evaluate the learned field in unit-ball coordinates."""
         return self.core(states)
 
+    def _forward_validated(self, states):
+        return self.radius * self.core._forward_validated(states / self.radius)
+
     def forward(self, states):
         """Evaluate ``R * core(z / R)`` for physical reduced coordinates ``z``."""
         self._states(states)
-        return self.radius * self.core(states / self.radius)
+        return self._forward_validated(states)
 
     def spectral_norms(self):
         return self.core.spectral_norms()
@@ -150,7 +169,7 @@ class _UnitBallField(nn.Module):
         return self.core.effective_lipschitz_bound()
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
-        self.core._evaluation_weights = None
+        self.core._clear_evaluation_cache()
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def configuration(self):

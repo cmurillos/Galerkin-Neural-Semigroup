@@ -103,11 +103,12 @@ The input and output factors cancel in its Lipschitz quotient, so
 a certificate.
 
 During optimization the projection remains in the differentiable forward map. Once
-the module enters evaluation mode, the projected weights are cached because they are
-fixed; ODE integration therefore does not recompute matrix norms at every stage.
-The cache is detached from the parameters but not from input states: state Jacobians
-remain available. Calling `semigroup.field.train()` invalidates the cache and restores
-parameter differentiation when it is explicitly required.
+the module enters evaluation mode, the projected weights and fixed biases are cached
+and detached from the parameters; ODE integration therefore neither recomputes matrix
+norms at every stage nor builds a parameter graph for ordinary states. The input is not
+detached: state Jacobians remain available whenever the input explicitly requires a
+gradient. Calling `semigroup.field.train()` invalidates the cache and restores parameter
+differentiation when it is explicitly required.
 
 ## D-004 — Time scaling
 
