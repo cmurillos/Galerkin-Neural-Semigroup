@@ -52,6 +52,7 @@ include = [
   "/tests",
   "/examples",
   "/docs",
+  "/AGENTS.md",
   "/README.md",
   "/LICENSE",
   "/CITATION.cff",

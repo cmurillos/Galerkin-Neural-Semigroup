@@ -2,6 +2,8 @@
 
 ## 0.1.0 - Unreleased
 
+- Add a root `AGENTS.md` with method-specific API, experiment, testing and cross-package
+  instructions for coding agents, and link it from the README.
 - Add the compact `NeuralSemigroupProblem(basis, weak, radius)` contract.
 - Keep Galerkin supervision private during target preparation and validation.
 - Add a fixed autonomous `tanh` MLP with exact spectral projection.

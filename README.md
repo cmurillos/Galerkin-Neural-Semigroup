@@ -178,6 +178,13 @@ Every leading state axis is a batch axis: the neural field maps `[...,N]` to
 See the [design contract](docs/design-contract.md) for fixed choices, invariants and
 current limitations.
 
+## Working with coding agents
+
+The root [`AGENTS.md`](AGENTS.md) gives coding agents a complete operational guide to the
+method invariants, compact public API, `ngfield` boundary, experiment protocol, testing
+workflow and current non-goals. Start the agent from the repository root so it discovers
+these instructions before writing examples or changing the library.
+
 ## Development
 
 ```bash
