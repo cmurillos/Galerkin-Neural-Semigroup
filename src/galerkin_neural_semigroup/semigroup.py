@@ -8,7 +8,7 @@ from types import MappingProxyType
 import torch
 
 from ._integration import solve as integrate
-from ._network import COMPACT_SUPPORT, UNIT_BALL_NORMALIZATION
+from ._network import COMPACT_SUPPORT, LEGACY_COMPACT_SUPPORT, UNIT_BALL_NORMALIZATION
 from ._validation import positive_real
 
 
@@ -154,6 +154,8 @@ class NeuralSemigroup:
         target.parent.mkdir(parents=True, exist_ok=True)
         configuration = self.field.configuration()
         if configuration.get("compact_support") == COMPACT_SUPPORT:
+            schema_version = 4
+        elif configuration.get("compact_support") == LEGACY_COMPACT_SUPPORT:
             schema_version = 3
         elif configuration.get("coordinate_normalization") == UNIT_BALL_NORMALIZATION:
             schema_version = 2

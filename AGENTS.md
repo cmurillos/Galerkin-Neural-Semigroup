@@ -193,7 +193,9 @@ must not be repeated.
 `problem.train(...)` exposes choices that the present method leaves to the user:
 
 - `hidden`: tuple/list of positive hidden widths; `()` is the exact affine test architecture;
-- `lipschitz`: positive global spectral budget;
+- `lipschitz`: `"auto"` (default, empirical Galerkin difference quotients) or a
+  positive numeric global base-network spectral budget;
+- `lipschitz_factor`: positive margin for the automatic estimate, default 1.5;
 - `samples`, `batch_size`, `epochs`, `lr`, and `seed`;
 - `sampling`: exactly `"volume"`, `"radius"`, or `"mixed"`;
 - advanced `device` and `dtype` overrides;
@@ -295,11 +297,20 @@ estimate presented as a certificate. The product of effective layer norms must n
 the requested budget up to numerical tolerance.
 
 The raw coordinate transform `F_raw(z)=R*F_hat(z/R)` preserves the core's Lipschitz
-quotient. New training deploys `F(z)=chi(||z||_2/R)*F_raw(z)`: `chi` equals one up to
-`0.9`, smoothly drops to zero at `1`, and is exactly zero beyond the ball. This
-postprocessing is fixed, with no trainable parameters or new loss. The requested
-spectral budget bounds the core; the deployed field has a larger certified global
-bound accounting for the taper (D-009). The physical-time velocity scales by `1/tau`.
+quotient. New training deploys `F(z)=chi(r)*R*F_hat(P(z/R))` for
+`r=||z||_2/R` and `P(x)=x/max(1,||x||_2)`: `chi` equals one up to `1`,
+smoothly drops to zero between `1` and `2`, and is exactly zero from `2` on.
+Postprocessing is fixed, with no trainable parameters or new loss. The
+selected spectral budget bounds the core; the deployed field has a
+separately calculated larger global bound (D-009). The physical-time
+velocity scales by `1/tau`.
+
+The default `lipschitz="auto"` measures symmetric difference quotients of the
+private Galerkin field in the unit ball at reproducible independent anchors,
+estimates local Jacobian operator norms, and multiplies their maximum by
+`lipschitz_factor` (D-010). It is explicitly an empirical estimate, not a
+certified global upper bound on an arbitrary nonlinear Galerkin field. Keep
+manual numeric budgets available and record the calibration method.
 
 During optimization, spectral projection stays in the differentiable forward path. In eval
 mode, projected weights and biases are cached and detached so ordinary ODE solves do not
@@ -357,15 +368,16 @@ A small defect does not measure agreement with the Galerkin field or the origina
 
 ## Persistence contract
 
-Version-3 `.gns` checkpoints additionally store the fixed compact-support taper.
+Version-4 `.gns` checkpoints store the outer-annulus taper and calibration
+metadata. Version-3 checkpoints retain their older 0.9R-to-R taper.
 Version-2 `.gns` checkpoints store the unit-ball-normalized network configuration, effective
 training radius, time scale, neural state, history, metrics, basis signature, dtype/device
 metadata, and reference-package revision. They deliberately do not serialize the weak-form
 callable or private numerical Galerkin evaluator. Loading therefore requires the same
 `NeuralSemigroupProblem` and operational basis.
 
-Keep schema-1 and schema-2 checkpoints loadable with their original semantics; never
-reinterpret them as schema 3. Any schema change needs explicit versioning, round-trip tests,
+Keep schemas 1, 2, and 3 loadable with their original semantics; never
+reinterpret them as schema 4. Any schema change needs explicit versioning, round-trip tests,
 old-checkpoint tests, and migration documentation. Treat the current basis signature as a
 compatibility guard, not a cryptographic/content proof of basis identity.
 
@@ -397,8 +409,8 @@ them accordingly when comparing with physical units.
 For structure-bearing examples, add the correct independent observable: dissipation,
 mass/mean conservation, equilibrium residual, boundary trace, or another
 problem-derived identity. `defect` is useful only for integration composition. The
-compactly supported learned field is stationary outside the ball and its exact flow
-cannot cross the boundary; do not ascribe that property to the Galerkin field or to
+compactly supported learned field is stationary from radius `2R` and its exact flow
+cannot cross that boundary; do not ascribe that property to the Galerkin field or to
 legacy checkpoints.
 
 Negative results are valid results. Do not silently alter sampling, add losses, shorten the
@@ -417,6 +429,8 @@ baseline, and stiffness explicitly.
   unit-ball wrapper, and eval cache.
 - `src/galerkin_neural_semigroup/_sampling.py`: the three fixed sampling laws and cached target
   scaling.
+- `src/galerkin_neural_semigroup/_lipschitz.py`: private empirical finite-difference
+  calibration of the reference's normalized local slopes.
 - `src/galerkin_neural_semigroup/_integration.py`: private explicit RK4 and Dormand--Prince
   integration.
 - `src/galerkin_neural_semigroup/_validation.py`: strict shared input validation.
@@ -579,7 +593,7 @@ Flag any change that:
 - detaches differentiable input states or retains target/reference graphs;
 - loses arbitrary leading batch axes, dtype/device strictness, or finite checks;
 - confuses composition defect with model accuracy;
-- breaks schema-1/schema-2 loading or schema-3 round trips;
+- breaks schema-1/schema-2/schema-3 loading or schema-4 round trips;
 - advances the NGF pin without full cross-repository tests;
 - reports a scientific guarantee not established by the implementation.
 

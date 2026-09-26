@@ -9,8 +9,12 @@ from torch.nn import functional as functional
 from ._validation import hidden_widths, positive_integer, positive_real
 
 UNIT_BALL_NORMALIZATION = "unit-ball"
-COMPACT_SUPPORT = "smooth-unit-ball"
-SUPPORT_INNER_RADIUS = 0.9
+COMPACT_SUPPORT = "smooth-annulus"
+LEGACY_COMPACT_SUPPORT = "smooth-unit-ball"
+SUPPORT_START_RADIUS = 1.0
+SUPPORT_END_RADIUS = 2.0
+LEGACY_SUPPORT_START_RADIUS = 0.9
+LEGACY_SUPPORT_END_RADIUS = 1.0
 
 
 class _SpectralMLP(nn.Module):
@@ -130,7 +134,15 @@ class _SpectralMLP(nn.Module):
 class _UnitBallField(nn.Module):
     """Expose a unit-ball network in physical coordinates with optional support."""
 
-    def __init__(self, core, radius, *, compact_support=False):
+    def __init__(
+        self,
+        core,
+        radius,
+        *,
+        compact_support=False,
+        support_start_radius=SUPPORT_START_RADIUS,
+        support_end_radius=SUPPORT_END_RADIUS,
+    ):
         super().__init__()
         if not isinstance(core, _SpectralMLP):
             raise TypeError("core must be a spectral MLP.")
@@ -139,6 +151,10 @@ class _UnitBallField(nn.Module):
         if not isinstance(compact_support, bool):
             raise TypeError("compact_support must be a boolean.")
         self.compact_support = compact_support
+        self.support_start_radius = positive_real(support_start_radius, "support_start_radius")
+        self.support_end_radius = positive_real(support_end_radius, "support_end_radius")
+        if self.support_start_radius >= self.support_end_radius:
+            raise ValueError("support_start_radius must be less than support_end_radius.")
 
     @property
     def dimension(self):
@@ -166,12 +182,16 @@ class _UnitBallField(nn.Module):
         flat = states.reshape(-1, self.dimension)
         radii = torch.linalg.vector_norm(flat, dim=-1)
         # Preserve nonfinite values for the integrator's existing error checks.
-        active = (radii < 1.0) | ~torch.isfinite(radii)
+        active = (radii < self.support_end_radius) | ~torch.isfinite(radii)
         inside = flat[active]
         r = radii[active]
-        transition = ((r - SUPPORT_INNER_RADIUS) / (1.0 - SUPPORT_INNER_RADIUS)).clamp(0, 1)
+        transition = (
+            (r - self.support_start_radius) / (self.support_end_radius - self.support_start_radius)
+        ).clamp(0, 1)
         taper = 1.0 - 3.0 * transition.square() + 2.0 * transition.pow(3)
-        values = self.core._forward_validated(inside) * taper.unsqueeze(-1)
+        # Outside the training ball, only evaluate the network on its boundary.
+        projected = inside / r.clamp_min(1.0).unsqueeze(-1)
+        values = self.core._forward_validated(projected) * taper.unsqueeze(-1)
         result = torch.zeros_like(flat)
         result[active] = values
         return result.reshape(states.shape)
@@ -194,9 +214,11 @@ class _UnitBallField(nn.Module):
         with torch.no_grad():
             zero = torch.zeros(self.dimension, device=self.device, dtype=self.dtype)
             offset = float(torch.linalg.vector_norm(self.core._forward_validated(zero)).item())
-        # |grad taper| <= 1.5 / (1 - inner radius); on the unit ball,
-        # |core(x)| <= |core(0)| + Lip(core). The R factors cancel.
-        return base_bound + 1.5 * (offset + base_bound) / (1.0 - SUPPORT_INNER_RADIUS)
+        # Radial projection onto the unit ball is 1-Lipschitz. On the unit
+        # ball |core(x)| <= |core(0)| + Lip(core); scaling by R cancels.
+        return base_bound + 1.5 * (offset + base_bound) / (
+            self.support_end_radius - self.support_start_radius
+        )
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         self.core._clear_evaluation_cache()
@@ -206,6 +228,14 @@ class _UnitBallField(nn.Module):
         configuration = self.core.configuration()
         configuration["coordinate_normalization"] = UNIT_BALL_NORMALIZATION
         if self.compact_support:
-            configuration["compact_support"] = COMPACT_SUPPORT
-            configuration["support_inner_radius_fraction"] = SUPPORT_INNER_RADIUS
+            if (
+                self.support_start_radius == LEGACY_SUPPORT_START_RADIUS
+                and self.support_end_radius == LEGACY_SUPPORT_END_RADIUS
+            ):
+                configuration["compact_support"] = LEGACY_COMPACT_SUPPORT
+                configuration["support_inner_radius_fraction"] = LEGACY_SUPPORT_START_RADIUS
+            else:
+                configuration["compact_support"] = COMPACT_SUPPORT
+                configuration["support_start_radius_fraction"] = self.support_start_radius
+                configuration["support_end_radius_fraction"] = self.support_end_radius
         return configuration

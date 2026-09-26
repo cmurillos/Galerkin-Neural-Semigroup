@@ -5,9 +5,14 @@ from pathlib import Path
 
 import torch
 
+from ._lipschitz import estimate_reference_lipschitz
 from ._network import (
     COMPACT_SUPPORT,
-    SUPPORT_INNER_RADIUS,
+    LEGACY_COMPACT_SUPPORT,
+    LEGACY_SUPPORT_END_RADIUS,
+    LEGACY_SUPPORT_START_RADIUS,
+    SUPPORT_END_RADIUS,
+    SUPPORT_START_RADIUS,
     UNIT_BALL_NORMALIZATION,
     _SpectralMLP,
     _UnitBallField,
@@ -71,7 +76,7 @@ class NeuralSemigroupProblem:
 
     The normal route receives an operational ngfield basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
-    restrictions are already carried by the basis. The user selects one of two
+    restrictions are already carried by the basis. The user selects one of three
     fixed vectorized sampling measures. The tanh MLP, direct field loss and exact
     spectral projection remain fixed by the method.
     """
@@ -140,7 +145,8 @@ class NeuralSemigroupProblem:
         self,
         *,
         hidden,
-        lipschitz,
+        lipschitz="auto",
+        lipschitz_factor=1.5,
         samples=10_000,
         sampling="volume",
         batch_size=256,
@@ -153,7 +159,9 @@ class NeuralSemigroupProblem:
     ):
         """Train the raw field on one fixed measure; taper only the deployed field."""
         hidden = hidden_widths(hidden)
-        lipschitz = positive_real(lipschitz, "lipschitz")
+        if lipschitz != "auto":
+            lipschitz = positive_real(lipschitz, "lipschitz")
+        lipschitz_factor = positive_real(lipschitz_factor, "lipschitz_factor")
         samples = positive_integer(samples, "samples", minimum=2)
         sampling = sampling_mode(sampling)
         batch_size = min(positive_integer(batch_size, "batch_size"), samples)
@@ -172,6 +180,30 @@ class NeuralSemigroupProblem:
         coordinate_system = self._build_coordinate_system(device=device, dtype=dtype)
         if coordinate_system.dimension != self.dimension:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
+
+        if lipschitz == "auto":
+            estimate, probes, step = estimate_reference_lipschitz(
+                coordinate_system,
+                self.dimension,
+                radius=self.radius,
+                time_scale=self.time_scale,
+                batch_size=batch_size,
+                generator=_generator(device, seed + 1789),
+                device=device,
+                dtype=dtype,
+            )
+            lipschitz = max(1e-6, lipschitz_factor * estimate)
+            calibration = {
+                "mode": "empirical-finite-difference",
+                "reference_estimate_normalized": estimate,
+                "probe_states": probes,
+                "step_normalized": step,
+                "factor": lipschitz_factor,
+                "certified_upper_bound": False,
+                "network_budget": lipschitz,
+            }
+        else:
+            calibration = {"mode": "manual", "network_budget": lipschitz}
 
         validation_samples = max(1, min(4096, samples // 10))
         train_unit_states = sample_unit_ball(
@@ -319,7 +351,8 @@ class NeuralSemigroupProblem:
                 "loss_coordinates": UNIT_BALL_NORMALIZATION,
                 "coordinate_normalization": UNIT_BALL_NORMALIZATION,
                 "compact_support": COMPACT_SUPPORT,
-                "support_inner_radius_fraction": SUPPORT_INNER_RADIUS,
+                "support_start_radius_fraction": SUPPORT_START_RADIUS,
+                "support_end_radius_fraction": SUPPORT_END_RADIUS,
                 "autonomous": True,
             },
             "training": {
@@ -333,6 +366,7 @@ class NeuralSemigroupProblem:
                 "optimizer": "Adam",
                 "target_mode": "cached",
                 "network_radius": 1.0,
+                "lipschitz_calibration": calibration,
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
@@ -353,7 +387,7 @@ class NeuralSemigroupProblem:
         device = compute_device(device)
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
         schema_version = checkpoint.get("schema_version")
-        if schema_version not in (1, 2, 3):
+        if schema_version not in (1, 2, 3, 4):
             raise ValueError("Unsupported Galerkin Neural Semigroup checkpoint schema.")
         configuration = checkpoint.get("field_configuration", {})
         if configuration.get("dimension") != self.dimension:
@@ -378,17 +412,33 @@ class NeuralSemigroupProblem:
             device=device,
             dtype=dtype,
         )
-        if schema_version in (2, 3):
+        if schema_version in (2, 3, 4):
             if configuration.get("coordinate_normalization") != UNIT_BALL_NORMALIZATION:
                 raise ValueError("The checkpoint records an unsupported coordinate normalization.")
             if schema_version == 3 and (
+                configuration.get("compact_support") != LEGACY_COMPACT_SUPPORT
+                or configuration.get("support_inner_radius_fraction") != LEGACY_SUPPORT_START_RADIUS
+            ):
+                raise ValueError("The checkpoint records an unsupported compact support.")
+            if schema_version == 4 and (
                 configuration.get("compact_support") != COMPACT_SUPPORT
-                or configuration.get("support_inner_radius_fraction") != SUPPORT_INNER_RADIUS
+                or configuration.get("support_start_radius_fraction") != SUPPORT_START_RADIUS
+                or configuration.get("support_end_radius_fraction") != SUPPORT_END_RADIUS
             ):
                 raise ValueError("The checkpoint records an unsupported compact support.")
             if schema_version == 2 and "compact_support" in configuration:
                 raise ValueError("The checkpoint compact support does not match its schema.")
-            field = _UnitBallField(core, self.radius, compact_support=schema_version == 3)
+            field = _UnitBallField(
+                core,
+                self.radius,
+                compact_support=schema_version in (3, 4),
+                support_start_radius=(
+                    LEGACY_SUPPORT_START_RADIUS if schema_version == 3 else SUPPORT_START_RADIUS
+                ),
+                support_end_radius=(
+                    LEGACY_SUPPORT_END_RADIUS if schema_version == 3 else SUPPORT_END_RADIUS
+                ),
+            )
         else:
             field = core
         field.load_state_dict(checkpoint["field_state"])

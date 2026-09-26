@@ -53,6 +53,10 @@ class TrainingTests(unittest.TestCase):
             semigroup.metrics["base_lipschitz_bound"],
         )
         self.assertGreaterEqual(semigroup.metrics["supported_validation_loss"], 0)
+        self.assertAlmostEqual(
+            semigroup.metrics["supported_validation_loss"],
+            semigroup.metrics["validation_loss"],
+        )
         self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
         self.assertEqual(semigroup.metadata["method"]["measure"], "normalized-volume-ball")
@@ -113,7 +117,7 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertEqual(semigroup.metadata["training"]["sampling"], "mixed")
         self.assertEqual(semigroup.metadata["method"]["measure"], "half-volume-half-radius-ball")
-        self.assertEqual(semigroup.metadata["method"]["compact_support"], "smooth-unit-ball")
+        self.assertEqual(semigroup.metadata["method"]["compact_support"], "smooth-annulus")
         self.assertEqual(
             semigroup.metrics["base_lipschitz_bound"],
             semigroup.field.core.effective_lipschitz_bound(),
@@ -140,7 +144,7 @@ class TrainingTests(unittest.TestCase):
             path = Path(directory) / "model.gns"
             semigroup.save(path)
             checkpoint = torch.load(path, weights_only=True)
-            self.assertEqual(checkpoint["schema_version"], 3)
+            self.assertEqual(checkpoint["schema_version"], 4)
             self.assertEqual(
                 checkpoint["field_configuration"]["coordinate_normalization"],
                 "unit-ball",
@@ -149,6 +153,60 @@ class TrainingTests(unittest.TestCase):
         torch.testing.assert_close(restored.field(states), expected)
         self.assertEqual(dict(restored.metrics), dict(semigroup.metrics))
         self.assertEqual(dict(restored.history), dict(semigroup.history))
+
+    def test_schema_three_retains_previous_support_boundary(self):
+        problem = heat_problem(radius=2.0)
+        coordinate_system = problem._build_coordinate_system(
+            device=torch.device("cpu"), dtype=torch.float64
+        )
+        from galerkin_neural_semigroup._network import _UnitBallField
+
+        core = _SpectralMLP(
+            problem.dimension, (), 2.0, device=torch.device("cpu"), dtype=torch.float64
+        )
+        with torch.no_grad():
+            core.weights[0].zero_()
+            core.biases[0].fill_(1.0)
+        field = _UnitBallField(
+            core,
+            problem.radius,
+            compact_support=True,
+            support_start_radius=0.9,
+            support_end_radius=1.0,
+        ).eval()
+        semigroup = NeuralSemigroup(
+            field=field,
+            coordinate_system=coordinate_system,
+            radius=problem.radius,
+            time_scale=problem.time_scale,
+            metadata={"basis": _basis_signature(problem.basis), "dtype": "float64"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old_supported.gns"
+            semigroup.save(path)
+            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 3)
+            restored = problem.load(path, device="cpu")
+        interior = torch.full((problem.dimension,), 1.9, dtype=torch.float64)
+        torch.testing.assert_close(restored.field(interior), field(interior))
+        self.assertEqual(restored.field.configuration()["compact_support"], "smooth-unit-ball")
+
+    def test_automatic_lipschitz_budget_records_empirical_status(self):
+        semigroup = heat_problem(radius=1.5, time_scale=0.5).train(
+            hidden=(),
+            samples=24,
+            batch_size=12,
+            epochs=1,
+            seed=7,
+            device="cpu",
+        )
+        calibration = semigroup.metadata["training"]["lipschitz_calibration"]
+        self.assertEqual(calibration["mode"], "empirical-finite-difference")
+        self.assertFalse(calibration["certified_upper_bound"])
+        self.assertGreater(calibration["reference_estimate_normalized"], 0)
+        self.assertAlmostEqual(
+            calibration["network_budget"],
+            1.5 * calibration["reference_estimate_normalized"],
+        )
 
     def test_schema_two_checkpoint_keeps_its_original_unmasked_field(self):
         problem = heat_problem(radius=2.0)

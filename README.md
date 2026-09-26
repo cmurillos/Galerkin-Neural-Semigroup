@@ -9,8 +9,8 @@ weak problem + fixed basis -> private reference evaluations -> neural field -> f
 ```
 
 The network is a `tanh` multilayer perceptron with exact spectral projection. Its
-base Lipschitz budget is `L`. A fixed smooth taper applied after training makes
-the deployed field zero at and outside the training ball; the tapered field remains
+base Lipschitz budget is `L`. A fixed smooth taper starts at the training radius `R`
+and makes the deployed field zero at and outside radius `2R`; it remains
 globally Lipschitz, although its certified bound may exceed `L`. The autonomous ODE is
 globally well posed and its
 continuous flow satisfies identity and composition by construction. Training directly
@@ -70,7 +70,7 @@ problem = NeuralSemigroupProblem(
 
 semigroup = problem.train(
     hidden=(64, 64),
-    lipschitz=10.0,
+    lipschitz="auto",
     samples=10_000,
     sampling="volume",
     batch_size=256,
@@ -104,19 +104,27 @@ mean_i ||F_hat_theta(x_i) - G_hat(x_i)||_2^2.
 
 It is evaluated over tensor batches, with no angular, relative, Jacobian or adaptive
 term. The `tanh` architecture, exact spectral projection and Adam optimizer remain
-fixed method decisions. The normalization is transparent to the public API:
+fixed method decisions. By default, `lipschitz="auto"` estimates local difference
+quotients of the private Galerkin field at independent states and gives the base
+network 1.5 times the largest observed normalized slope. This is an empirical
+estimate, **not** a certified upper bound for a nonlinear field; pass a positive
+number as `lipschitz` to set the spectral budget manually. The optional
+`lipschitz_factor` changes the default 1.5 margin. The estimate, margin, and
+chosen budget appear in `semigroup.metadata["training"]["lipschitz_calibration"]`.
+The normalization is transparent to the public API:
 
 ```text
-semigroup.field(z) = chi(||z||_2/R) * R * F_hat_theta(z / R).
+semigroup.field(z) = chi(||z||_2/R) * R * F_hat_theta(P(z / R)),
+P(x) = x / max(1, ||x||_2).
 ```
 
-Here `chi=1` through radius `0.9R`, decreases smoothly to zero at `R`, and
-vanishes outside. It is applied after training; the training and validation
-losses still compare the raw neural field to the Galerkin field. The compact
-support bounds trajectories starting in the ball but necessarily changes the
-field near its boundary. A trajectory beginning outside the ball is stationary.
-The additional norm/mask costs a small amount of work inside the ball and skips
-neural evaluation for states outside.
+Here `chi=1` through radius `R`, decreases smoothly to zero at `2R`, and
+vanishes beyond. The projection `P` prevents evaluation on network inputs
+outside the training ball. Inside `R` the deployed field exactly matches the
+raw network, including the boundary. Training and validation losses retain
+their original meaning. Trajectories may leave the training ball, but the
+continuous learned flow cannot cross the stationary boundary at `2R`.
+The taper's global Lipschitz bound may exceed the base network budget.
 
 ## Evolution and reconstruction
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Preserve the raw learned field through the full training radius R; taper
+  from R to 2R, projecting network inputs onto the training ball beyond R.
+  The field becomes zero from 2R onward. The deployed Lipschitz bound can
+  still exceed the raw network budget.
+- Estimate the default spectral budget from reproducible private Galerkin
+  difference quotients, with a configurable multiplier and an explicit
+  uncertified status; preserve numeric manual budgets.
+- Save the new taper in schema-4 checkpoints, retaining prior checkpoint
+  behavior for schemas 1, 2, and 3.
 - Add a fixed 50/50 mixture of volume and uniform-radius sampling.
 - Apply a smooth compact-support taper after training to new neural fields:
   they agree with the raw network through radius 0.9R and vanish at and outside R.
