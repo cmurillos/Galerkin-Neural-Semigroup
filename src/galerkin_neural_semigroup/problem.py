@@ -5,7 +5,13 @@ from pathlib import Path
 
 import torch
 
-from ._network import UNIT_BALL_NORMALIZATION, _SpectralMLP, _UnitBallField
+from ._network import (
+    COMPACT_SUPPORT,
+    SUPPORT_INNER_RADIUS,
+    UNIT_BALL_NORMALIZATION,
+    _SpectralMLP,
+    _UnitBallField,
+)
 from ._sampling import sample_unit_ball, sampling_mode, unit_ball_targets
 from ._validation import (
     compute_device,
@@ -145,7 +151,7 @@ class NeuralSemigroupProblem:
         dtype=None,
         verbose=False,
     ):
-        """Train with direct field matching on one fixed sampling measure."""
+        """Train the raw field on one fixed measure; taper only the deployed field."""
         hidden = hidden_widths(hidden)
         lipschitz = positive_real(lipschitz, "lipschitz")
         samples = positive_integer(samples, "samples", minimum=2)
@@ -208,6 +214,7 @@ class NeuralSemigroupProblem:
                 dtype=dtype,
             ),
             self.radius,
+            compact_support=True,
         )
         optimizer = torch.optim.Adam(field.parameters(), lr=lr)
         training_losses = []
@@ -224,7 +231,7 @@ class NeuralSemigroupProblem:
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
                 loss = _field_loss(
-                    field.normalized(train_unit_states[indices]),
+                    field.core(train_unit_states[indices]),
                     train_targets[indices],
                 )
                 optimizer.zero_grad(set_to_none=True)
@@ -236,7 +243,7 @@ class NeuralSemigroupProblem:
                 raise FloatingPointError("Training produced a nonfinite loss.")
             field.eval()
             validation_loss = _mean_loss(
-                field.normalized,
+                field.core,
                 validation_unit_states,
                 validation_targets,
                 batch_size,
@@ -264,9 +271,15 @@ class NeuralSemigroupProblem:
         field.load_state_dict(best_state)
         field.eval()
         final_training_loss = _mean_loss(
-            field.normalized,
+            field.core,
             train_unit_states,
             train_targets,
+            batch_size,
+        )
+        supported_validation_loss = _mean_loss(
+            field.normalized,
+            validation_unit_states,
+            validation_targets,
             batch_size,
         )
         norms = field.spectral_norms()
@@ -278,12 +291,15 @@ class NeuralSemigroupProblem:
             "best_epoch": best_epoch + 1,
             "training_loss": final_training_loss,
             "validation_loss": best_loss,
+            "supported_validation_loss": supported_validation_loss,
+            "base_lipschitz_bound": field.core.effective_lipschitz_bound(),
             "effective_lipschitz_bound": field.effective_lipschitz_bound(),
             "layer_spectral_norms": norms,
         }
         measure = {
             "volume": "normalized-volume-ball",
             "radius": "uniform-radius-ball",
+            "mixed": "half-volume-half-radius-ball",
         }[sampling]
         metadata = {
             "basis": _basis_signature(self.basis),
@@ -302,6 +318,8 @@ class NeuralSemigroupProblem:
                 "loss": "mean-squared-euclidean-field-error",
                 "loss_coordinates": UNIT_BALL_NORMALIZATION,
                 "coordinate_normalization": UNIT_BALL_NORMALIZATION,
+                "compact_support": COMPACT_SUPPORT,
+                "support_inner_radius_fraction": SUPPORT_INNER_RADIUS,
                 "autonomous": True,
             },
             "training": {
@@ -335,7 +353,7 @@ class NeuralSemigroupProblem:
         device = compute_device(device)
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
         schema_version = checkpoint.get("schema_version")
-        if schema_version not in (1, 2):
+        if schema_version not in (1, 2, 3):
             raise ValueError("Unsupported Galerkin Neural Semigroup checkpoint schema.")
         configuration = checkpoint.get("field_configuration", {})
         if configuration.get("dimension") != self.dimension:
@@ -360,10 +378,17 @@ class NeuralSemigroupProblem:
             device=device,
             dtype=dtype,
         )
-        if schema_version == 2:
+        if schema_version in (2, 3):
             if configuration.get("coordinate_normalization") != UNIT_BALL_NORMALIZATION:
                 raise ValueError("The checkpoint records an unsupported coordinate normalization.")
-            field = _UnitBallField(core, self.radius)
+            if schema_version == 3 and (
+                configuration.get("compact_support") != COMPACT_SUPPORT
+                or configuration.get("support_inner_radius_fraction") != SUPPORT_INNER_RADIUS
+            ):
+                raise ValueError("The checkpoint records an unsupported compact support.")
+            if schema_version == 2 and "compact_support" in configuration:
+                raise ValueError("The checkpoint compact support does not match its schema.")
+            field = _UnitBallField(core, self.radius, compact_support=schema_version == 3)
         else:
             field = core
         field.load_state_dict(checkpoint["field_state"])

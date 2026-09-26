@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add a fixed 50/50 mixture of volume and uniform-radius sampling.
+- Apply a smooth compact-support taper after training to new neural fields:
+  they agree with the raw network through radius 0.9R and vanish at and outside R.
+  Keep the raw loss and report the deployed validation error and its larger
+  global Lipschitz bound separately.
+- Store the taper in schema-3 checkpoints; schema-1 and schema-2 checkpoints
+  retain their original behavior.
+
 ## 0.1.0 - Unreleased
 
 - Add a root `AGENTS.md` with method-specific API, experiment, testing and cross-package

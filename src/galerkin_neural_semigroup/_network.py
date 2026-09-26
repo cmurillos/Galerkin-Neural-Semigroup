@@ -9,6 +9,8 @@ from torch.nn import functional as functional
 from ._validation import hidden_widths, positive_integer, positive_real
 
 UNIT_BALL_NORMALIZATION = "unit-ball"
+COMPACT_SUPPORT = "smooth-unit-ball"
+SUPPORT_INNER_RADIUS = 0.9
 
 
 class _SpectralMLP(nn.Module):
@@ -126,14 +128,17 @@ class _SpectralMLP(nn.Module):
 
 
 class _UnitBallField(nn.Module):
-    """Expose a unit-ball network as a field in physical reduced coordinates."""
+    """Expose a unit-ball network in physical coordinates with optional support."""
 
-    def __init__(self, core, radius):
+    def __init__(self, core, radius, *, compact_support=False):
         super().__init__()
         if not isinstance(core, _SpectralMLP):
             raise TypeError("core must be a spectral MLP.")
         self.core = core
         self.radius = positive_real(radius, "radius")
+        if not isinstance(compact_support, bool):
+            raise TypeError("compact_support must be a boolean.")
+        self.compact_support = compact_support
 
     @property
     def dimension(self):
@@ -151,14 +156,31 @@ class _UnitBallField(nn.Module):
         self.core._states(states)
 
     def normalized(self, states):
-        """Evaluate the learned field in unit-ball coordinates."""
-        return self.core(states)
+        """Evaluate the deployed field in normalized coordinates."""
+        self.core._states(states)
+        return self._normalized_validated(states)
+
+    def _normalized_validated(self, states):
+        if not self.compact_support:
+            return self.core._forward_validated(states)
+        flat = states.reshape(-1, self.dimension)
+        radii = torch.linalg.vector_norm(flat, dim=-1)
+        # Preserve nonfinite values for the integrator's existing error checks.
+        active = (radii < 1.0) | ~torch.isfinite(radii)
+        inside = flat[active]
+        r = radii[active]
+        transition = ((r - SUPPORT_INNER_RADIUS) / (1.0 - SUPPORT_INNER_RADIUS)).clamp(0, 1)
+        taper = 1.0 - 3.0 * transition.square() + 2.0 * transition.pow(3)
+        values = self.core._forward_validated(inside) * taper.unsqueeze(-1)
+        result = torch.zeros_like(flat)
+        result[active] = values
+        return result.reshape(states.shape)
 
     def _forward_validated(self, states):
-        return self.radius * self.core._forward_validated(states / self.radius)
+        return self.radius * self._normalized_validated(states / self.radius)
 
     def forward(self, states):
-        """Evaluate ``R * core(z / R)`` for physical reduced coordinates ``z``."""
+        """Evaluate the scaled, optionally supported field in physical coordinates."""
         self._states(states)
         return self._forward_validated(states)
 
@@ -166,7 +188,15 @@ class _UnitBallField(nn.Module):
         return self.core.spectral_norms()
 
     def effective_lipschitz_bound(self):
-        return self.core.effective_lipschitz_bound()
+        base_bound = self.core.effective_lipschitz_bound()
+        if not self.compact_support:
+            return base_bound
+        with torch.no_grad():
+            zero = torch.zeros(self.dimension, device=self.device, dtype=self.dtype)
+            offset = float(torch.linalg.vector_norm(self.core._forward_validated(zero)).item())
+        # |grad taper| <= 1.5 / (1 - inner radius); on the unit ball,
+        # |core(x)| <= |core(0)| + Lip(core). The R factors cancel.
+        return base_bound + 1.5 * (offset + base_bound) / (1.0 - SUPPORT_INNER_RADIUS)
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         self.core._clear_evaluation_cache()
@@ -175,4 +205,7 @@ class _UnitBallField(nn.Module):
     def configuration(self):
         configuration = self.core.configuration()
         configuration["coordinate_normalization"] = UNIT_BALL_NORMALIZATION
+        if self.compact_support:
+            configuration["compact_support"] = COMPACT_SUPPORT
+            configuration["support_inner_radius_fraction"] = SUPPORT_INNER_RADIUS
         return configuration

@@ -45,9 +45,14 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertTrue(semigroup.metrics["validation_loss"] >= 0)
         self.assertLessEqual(
-            semigroup.metrics["effective_lipschitz_bound"],
+            semigroup.metrics["base_lipschitz_bound"],
             2.0 * (1 + 1e-12),
         )
+        self.assertGreaterEqual(
+            semigroup.metrics["effective_lipschitz_bound"],
+            semigroup.metrics["base_lipschitz_bound"],
+        )
+        self.assertGreaterEqual(semigroup.metrics["supported_validation_loss"], 0)
         self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
         self.assertEqual(semigroup.metadata["method"]["measure"], "normalized-volume-ball")
@@ -94,6 +99,29 @@ class TrainingTests(unittest.TestCase):
             "mean-squared-euclidean-field-error",
         )
 
+    def test_mixed_sampling_and_compact_support_are_recorded(self):
+        semigroup = heat_problem().train(
+            hidden=(),
+            lipschitz=2.0,
+            samples=32,
+            sampling="mixed",
+            batch_size=16,
+            epochs=2,
+            lr=1e-2,
+            seed=5,
+            device="cpu",
+        )
+        self.assertEqual(semigroup.metadata["training"]["sampling"], "mixed")
+        self.assertEqual(semigroup.metadata["method"]["measure"], "half-volume-half-radius-ball")
+        self.assertEqual(semigroup.metadata["method"]["compact_support"], "smooth-unit-ball")
+        self.assertEqual(
+            semigroup.metrics["base_lipschitz_bound"],
+            semigroup.field.core.effective_lipschitz_bound(),
+        )
+        outside = torch.full((3, semigroup.dimension), 5.0, dtype=semigroup.dtype)
+        torch.testing.assert_close(semigroup.field(outside), torch.zeros_like(outside))
+        torch.testing.assert_close(semigroup.velocity(outside), torch.zeros_like(outside))
+
     def test_checkpoint_round_trip_uses_same_problem(self):
         problem = heat_problem()
         semigroup = problem.train(
@@ -112,7 +140,7 @@ class TrainingTests(unittest.TestCase):
             path = Path(directory) / "model.gns"
             semigroup.save(path)
             checkpoint = torch.load(path, weights_only=True)
-            self.assertEqual(checkpoint["schema_version"], 2)
+            self.assertEqual(checkpoint["schema_version"], 3)
             self.assertEqual(
                 checkpoint["field_configuration"]["coordinate_normalization"],
                 "unit-ball",
@@ -121,6 +149,36 @@ class TrainingTests(unittest.TestCase):
         torch.testing.assert_close(restored.field(states), expected)
         self.assertEqual(dict(restored.metrics), dict(semigroup.metrics))
         self.assertEqual(dict(restored.history), dict(semigroup.history))
+
+    def test_schema_two_checkpoint_keeps_its_original_unmasked_field(self):
+        problem = heat_problem(radius=2.0)
+        coordinate_system = problem._build_coordinate_system(
+            device=torch.device("cpu"), dtype=torch.float64
+        )
+        from galerkin_neural_semigroup._network import _UnitBallField
+
+        core = _SpectralMLP(
+            problem.dimension, (), 2.0, device=torch.device("cpu"), dtype=torch.float64
+        )
+        with torch.no_grad():
+            core.weights[0].zero_()
+            core.biases[0].fill_(1.0)
+        field = _UnitBallField(core, problem.radius).eval()
+        semigroup = NeuralSemigroup(
+            field=field,
+            coordinate_system=coordinate_system,
+            radius=problem.radius,
+            time_scale=problem.time_scale,
+            metadata={"basis": _basis_signature(problem.basis), "dtype": "float64"},
+        )
+        outside = torch.full((problem.dimension,), 3.0, dtype=torch.float64)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.gns"
+            semigroup.save(path)
+            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 2)
+            restored = problem.load(path, device="cpu")
+        torch.testing.assert_close(restored.field(outside), field(outside))
+        self.assertGreater(torch.linalg.vector_norm(restored.field(outside)).item(), 0)
 
     def test_schema_one_checkpoint_remains_loadable_without_reinterpretation(self):
         problem = heat_problem(radius=2.0)

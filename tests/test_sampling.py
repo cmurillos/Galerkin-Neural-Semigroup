@@ -33,6 +33,16 @@ class FixedSamplingTests(unittest.TestCase):
         self.assertTrue(torch.all(radii <= 1.0))
         self.assertLess(abs(radii.mean().item() - 0.5), 0.01)
 
+    def test_mixed_sampling_is_reproducible_half_volume_half_radius(self):
+        dimension = 5
+        states = self._sample("mixed", dimension=dimension)
+        radii = torch.linalg.vector_norm(states, dim=-1)
+        expected_mean = 0.5 * (dimension / (dimension + 1) + 0.5)
+
+        self.assertTrue(torch.all(radii <= 1.0))
+        self.assertLess(abs(radii.mean().item() - expected_mean), 0.01)
+        torch.testing.assert_close(states, self._sample("mixed", dimension=dimension))
+
     def test_targets_use_physical_states_and_normalized_field_scale(self):
         states = torch.randn(11, 3, dtype=torch.float64, requires_grad=True)
         calls = []

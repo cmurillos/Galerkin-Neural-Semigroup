@@ -115,6 +115,39 @@ class SpectralMLPTests(unittest.TestCase):
         field.load_state_dict(zero_state)
         torch.testing.assert_close(field(states), torch.zeros_like(states))
 
+    def test_compact_field_is_unchanged_in_core_and_zero_on_and_outside_ball(self):
+        core = _SpectralMLP(2, (), 2.0, device=torch.device("cpu"), dtype=torch.float64)
+        with torch.no_grad():
+            core.weights[0].copy_(torch.eye(2, dtype=torch.float64))
+            core.biases[0].copy_(torch.tensor([0.2, -0.1], dtype=torch.float64))
+        field = _UnitBallField(core, radius=2.0, compact_support=True).eval()
+        states = torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [1.9, 0.0], [2.0, 0.0], [3.0, 0.0]],
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        values = field(states)
+
+        torch.testing.assert_close(values[:2], 2.0 * core(states[:2] / 2.0))
+        torch.testing.assert_close(values[3:], torch.zeros_like(values[3:]))
+        self.assertEqual(values.shape, states.shape)
+        self.assertEqual(field(torch.empty(0, 3, 2, dtype=states.dtype)).shape, (0, 3, 2))
+        self.assertGreater(field.effective_lipschitz_bound(), core.effective_lipschitz_bound())
+        values.sum().backward()
+        self.assertTrue(torch.isfinite(states.grad).all())
+        torch.testing.assert_close(states.grad[3:], torch.zeros_like(states.grad[3:]))
+
+    def test_compact_field_is_continuous_at_support_boundary(self):
+        core = _SpectralMLP(1, (), 1.0, device=torch.device("cpu"), dtype=torch.float64)
+        with torch.no_grad():
+            core.weights[0].zero_()
+            core.biases[0].fill_(1.0)
+        field = _UnitBallField(core, radius=3.0, compact_support=True).eval()
+        near = torch.tensor([3.0 * (1.0 - 1e-4)], dtype=torch.float64)
+        at = torch.tensor([3.0], dtype=torch.float64)
+        self.assertLess(torch.linalg.vector_norm(field(near) - field(at)).item(), 1e-4)
+        torch.testing.assert_close(field(at), torch.zeros_like(at))
+
 
 if __name__ == "__main__":
     unittest.main()

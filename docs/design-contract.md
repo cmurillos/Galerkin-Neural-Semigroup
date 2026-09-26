@@ -30,7 +30,7 @@ an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
 The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
 `GalerkinProblem` workflows. Neither route returns the numerical reference field.
 
-## D-002 — Two fixed learning measures and direct objective
+## D-002 — Three fixed learning measures and direct objective
 
 The physical training domain is
 
@@ -39,17 +39,20 @@ B_N(R0) = {z in R^N : ||z||_2 < R0}.
 ```
 
 The network sees normalized coordinates `x = z/R0` in `B_N(1)`. For a standard
-Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation offers exactly two
+Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation offers three
 fixed, non-adaptive measures:
 
 ```text
 sampling="volume": x = s^(1/N) * xi / ||xi||_2,
 sampling="radius": x = s       * xi / ||xi||_2,
+sampling="mixed":  choose "volume" or "radius" independently with probability 1/2,
 physical state:    z = R0 * x.
 ```
 
 The first is normalized Lebesgue volume on the ball. The second is the product of the
 uniform radial measure on `(0,R0)` and uniform angular measure on the unit sphere.
+The third is their equal-probability mixture, with a new Bernoulli choice for every
+sample. It is not uniform volume or an adaptive sampling law.
 Directions, radii, normalized states and physical target states are generated
 vectorially. Training and validation states are drawn once from independent samples of
 the same selected measure. Epochs shuffle the fixed training tensor; they neither
@@ -94,11 +97,13 @@ If there are `d` affine layers and the user requests global budget `Lmax`, the p
 sets `gamma = Lmax^(1/d)`. The field exposed in physical reduced coordinates is
 
 ```text
-F(z) = R0 * F_hat(z/R0).
+F_base(z) = R0 * F_hat(z/R0).
 ```
 
 The input and output factors cancel in its Lipschitz quotient, so
-`Lip(F) = Lip(F_hat) <= Lmax` independently of depth. Spectral norms are computed by
+`Lip(F_base) = Lip(F_hat) <= Lmax` independently of depth. The deployed field now
+also receives the fixed compact-support taper of D-009, whose global Lipschitz
+bound can exceed the requested base-network budget. Spectral norms are computed by
 `torch.linalg.matrix_norm(..., ord=2)`; a finite power-iteration estimate is not used as
 a certificate.
 
@@ -128,7 +133,7 @@ problem.train(
     hidden=...,
     lipschitz=...,
     samples=...,
-    sampling="volume",  # or "radius"
+    sampling="volume",  # or "radius" or "mixed"
     batch_size=...,
     epochs=...,
     lr=...,
@@ -137,7 +142,7 @@ problem.train(
 ```
 
 Adam, the direct field loss and cached targets are fixed. `sampling` selects one of the
-two measures in D-002 and does not change during training. Device selection defaults to
+three measures in D-002 and does not change during training. Device selection defaults to
 CUDA when available and otherwise CPU. Computation uses float64 by default; `device`
 and `dtype` are explicit advanced overrides because they affect reproducibility.
 
@@ -163,13 +168,13 @@ term.
 
 ## D-007 — Persistence and provenance
 
-Version-2 checkpoints contain neural parameters, architecture, the unit-ball
+Version-3 checkpoints contain neural parameters, architecture, the unit-ball
 normalization marker, `R0`, time scale, optimization history, basis signature, precision,
-device and the pinned reference-package revision. They do not serialize the weak-form
+device, compact-support marker and the pinned reference-package revision. They do not serialize the weak-form
 evaluator or the private numerical field. Loading therefore occurs through the same
 `NeuralSemigroupProblem` and rejects incompatible dimensions, signatures, radii or time
-scales. Version-1 checkpoints remain loadable with their original, unnormalized field
-semantics and are never silently reinterpreted.
+scales. Version-1 and version-2 checkpoints remain loadable with their original
+unnormalized and unmasked field semantics, respectively, and are never silently reinterpreted.
 
 The current basis signature is deliberately conservative: dimension, physical value
 shape, family and component allocation when available. The user remains responsible for
@@ -177,11 +182,42 @@ supplying the same ordered operational basis; a stronger content hash is future 
 
 ## D-008 — Scope
 
-- Training controls a field only through a finite sample from the selected measure; the
-  ball is not asserted to be positively invariant.
+- Training controls the raw field only through a finite sample from the selected measure.
+  The compactly supported continuous learned flow keeps initial states in the closed ball
+  inside that ball, but this does not imply agreement with Galerkin near its boundary.
 - A small empirical loss is not a certified uniform error.
 - Exact spectral projection guarantees global well-posedness of the learned ODE but does
   not establish convergence to the original infinite-dimensional evolution.
 - Explicit integration may be expensive for stiff reduced dynamics.
 - The fixed MLP is the method implemented here. Alternative neural architectures are not
   part of the initial public API.
+
+## D-009 — Compact support after training
+
+Newly trained models deploy a fixed multiplier in normalized coordinates
+`r = ||z||_2/R0`. The raw neural field is fitted to the unmodified Galerkin target
+throughout the sampled ball. After training, the exposed field is
+
+```text
+F_supported(z) = chi(r) * R0 * F_hat(z/R0),
+chi(r) = 1                         for r <= 0.9,
+       = 1 - 3q^2 + 2q^3           for 0.9 < r < 1, q=(r-0.9)/0.1,
+       = 0                         for r >= 1.
+```
+
+The same multiplier applies to `field`, physical-time `velocity`, and the integrated
+flow. Outside the ball the network is not evaluated. The C1 transition avoids the
+discontinuity of a hard threshold and gives an exactly zero field at and outside
+the support boundary. No additional training objective or learned parameter is added.
+The output equals the raw network on the inner 90% of the radius; in the outer shell
+it is generally biased relative to Galerkin. Training/validation losses still describe
+the raw fitted field; `supported_validation_loss` measures the deployed field separately.
+
+If `L_base` bounds the raw field's Lipschitz quotient and `a=||F_hat(0)||_2`, a valid
+global bound for the deployed field is
+`L_base + 15*(a + L_base)`; the radius normalization cancels. This may exceed
+the user-specified base budget. The continuous flow is globally unique, and a state
+starting in the closed ball cannot cross the stationary boundary in finite time.
+Numerical trajectories can have small integration error; the algorithm does not silently
+clip states. A state starting outside remains stationary, which is an intentional
+restriction of the learned flow rather than an extension of the Galerkin dynamics.

@@ -2,20 +2,20 @@
 
 import torch
 
-SAMPLING_MODES = ("volume", "radius")
+SAMPLING_MODES = ("volume", "radius", "mixed")
 
 
 def sampling_mode(value):
-    """Validate one of the two fixed sampling measures."""
+    """Validate one of the three fixed sampling measures."""
     if not isinstance(value, str):
-        raise TypeError("sampling must be 'volume' or 'radius'.")
+        raise TypeError("sampling must be 'volume', 'radius', or 'mixed'.")
     if value not in SAMPLING_MODES:
-        raise ValueError("sampling must be 'volume' or 'radius'.")
+        raise ValueError("sampling must be 'volume', 'radius', or 'mixed'.")
     return value
 
 
 def sample_unit_ball(count, dimension, *, sampling, generator, device, dtype):
-    """Sample the unit ball uniformly in volume or uniformly in radius."""
+    """Sample volume, uniform radius, or an independent 50/50 mixture."""
     sampling = sampling_mode(sampling)
     directions = torch.randn(
         count,
@@ -36,6 +36,9 @@ def sample_unit_ball(count, dimension, *, sampling, generator, device, dtype):
     )
     if sampling == "volume":
         radii = radii.pow(1.0 / dimension)
+    elif sampling == "mixed":
+        volume = torch.rand(count, 1, generator=generator, device=device, dtype=dtype) < 0.5
+        radii = torch.where(volume, radii.pow(1.0 / dimension), radii)
     return radii * directions
 
 

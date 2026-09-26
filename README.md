@@ -8,10 +8,13 @@ workflow never exposes the numerical Galerkin field used as supervision:
 weak problem + fixed basis -> private reference evaluations -> neural field -> flow
 ```
 
-The network is a `tanh` multilayer perceptron with exact spectral projection. If its
-global Lipschitz budget is `L`, the autonomous ODE is globally well posed and its
+The network is a `tanh` multilayer perceptron with exact spectral projection. Its
+base Lipschitz budget is `L`. A fixed smooth taper applied after training makes
+the deployed field zero at and outside the training ball; the tapered field remains
+globally Lipschitz, although its certified bound may exceed `L`. The autonomous ODE is
+globally well posed and its
 continuous flow satisfies identity and composition by construction. Training directly
-matches the neural and Galerkin fields on one of two fixed samples of the reduced ball;
+matches the neural and Galerkin fields on one of three fixed measures of the reduced ball;
 it does not generate reference trajectories or field derivatives.
 
 This repository is early research software. The mathematical and numerical contracts
@@ -79,16 +82,17 @@ semigroup = problem.train(
 
 `basis.dimension` determines both the input and output dimensions. The network is always
 trained in normalized coordinates `x = z / R`, so its input domain has radius one even
-when the physical reduced domain has radius `R`. Sampling has exactly two fixed,
+when the physical reduced domain has radius `R`. Sampling has three fixed,
 non-adaptive options. If `U` is uniform on `(0,1)` and `xi` is a standard Gaussian
-direction, both are generated in one vectorized operation:
+direction, all are generated in vectorized operations:
 
 | `sampling` | Unit radius | Physical radius | Measure |
 | --- | --- | --- | --- |
 | `"volume"` | `U**(1/N)` | `R * U**(1/N)` | Normalized volume (default). |
 | `"radius"` | `U` | `R * U` | Uniform radius and uniform angle. |
+| `"mixed"` | 50/50 choice of the preceding radii | `R` times that choice | Equal mixture of both measures. |
 
-In both cases `x = q * xi / ||xi||` and the reference is evaluated at the physical state
+In all cases `x = q * xi / ||xi||` and the reference is evaluated at the physical state
 `z = R * x`. Training and validation states are drawn once from independent samples of
 the selected measure and are not adapted or resampled. For `time_scale = tau`, the
 normalized target and the only learning objective are
@@ -103,8 +107,16 @@ term. The `tanh` architecture, exact spectral projection and Adam optimizer rema
 fixed method decisions. The normalization is transparent to the public API:
 
 ```text
-semigroup.field(z) = R * F_hat_theta(z / R).
+semigroup.field(z) = chi(||z||_2/R) * R * F_hat_theta(z / R).
 ```
+
+Here `chi=1` through radius `0.9R`, decreases smoothly to zero at `R`, and
+vanishes outside. It is applied after training; the training and validation
+losses still compare the raw neural field to the Galerkin field. The compact
+support bounds trajectories starting in the ball but necessarily changes the
+field near its boundary. A trajectory beginning outside the ball is stationary.
+The additional norm/mask costs a small amount of work inside the ball and skips
+neural evaluation for states outside.
 
 ## Evolution and reconstruction
 
@@ -164,7 +176,7 @@ The stable surface is intentionally small:
 | Object or operation | Meaning |
 | --- | --- |
 | `NeuralSemigroupProblem(...)` | Basis, weak form and reduced training domain. |
-| `problem.train(...)` | Choose `volume` or `radius`, build targets and fit the field. |
+| `problem.train(...)` | Choose `volume`, `radius`, or `mixed`, build targets and fit the raw field. |
 | `NeuralSemigroup` | Trained field together with its continuous-flow interface. |
 | `semigroup.field(z)` | Scaled learned autonomous field. |
 | `semigroup.velocity(z)` | Learned velocity in physical time. |

@@ -195,7 +195,7 @@ must not be repeated.
 - `hidden`: tuple/list of positive hidden widths; `()` is the exact affine test architecture;
 - `lipschitz`: positive global spectral budget;
 - `samples`, `batch_size`, `epochs`, `lr`, and `seed`;
-- `sampling`: exactly `"volume"` or `"radius"`;
+- `sampling`: exactly `"volume"`, `"radius"`, or `"mixed"`;
 - advanced `device` and `dtype` overrides;
 - `verbose` progress output.
 
@@ -231,24 +231,26 @@ and compatibility plan.
 
 ## Sampling and dataset invariants
 
-Training supports exactly two vectorized probability measures. With independent
+Training supports three vectorized probability measures. With independent
 `s ~ Uniform(0,1)` and Gaussian direction `xi`:
 
 ```text
 direction = xi / ||xi||_2
 sampling="volume": x = s^(1/N) * direction
 sampling="radius": x = s       * direction
+sampling="mixed": choose volume or radius independently with probability 1/2
 physical target state: z = R*x
 ```
 
 `"volume"` is normalized Lebesgue volume on the N-ball. `"radius"` is uniform radius
-times uniform angular measure; it is not uniform volume. Preserve this distinction in code,
+times uniform angular measure; it is not uniform volume. `"mixed"` is their 50/50
+mixture, sampled independently for each state. Preserve this distinction in code,
 plots, docs, and scientific interpretation.
 
 Training states and validation states are drawn once, independently, from the same selected
 measure. They stay fixed for the entire run. Epochs shuffle indices only. Do not resample per
-epoch, adapt points, add radial layers, mix the two measures, or change validation measure
-without an approved method change.
+epoch, adapt points, add radial layers, change the fixed mixture, or change validation
+measure without an approved method change.
 
 Targets are evaluated at `R*x` in vectorized batches, scaled by `tau/R`, detached, checked
 for finiteness, and cached. Target generation must not retain an autograd graph through the
@@ -292,8 +294,12 @@ norms are computed with `torch.linalg.matrix_norm(..., ord=2)`, not a finite pow
 estimate presented as a certificate. The product of effective layer norms must not exceed
 the requested budget up to numerical tolerance.
 
-The coordinate transform `F(z)=R*F_hat(z/R)` preserves the field's Lipschitz quotient. The
-physical-time velocity has the corresponding scale `1/tau`.
+The raw coordinate transform `F_raw(z)=R*F_hat(z/R)` preserves the core's Lipschitz
+quotient. New training deploys `F(z)=chi(||z||_2/R)*F_raw(z)`: `chi` equals one up to
+`0.9`, smoothly drops to zero at `1`, and is exactly zero beyond the ball. This
+postprocessing is fixed, with no trainable parameters or new loss. The requested
+spectral budget bounds the core; the deployed field has a larger certified global
+bound accounting for the taper (D-009). The physical-time velocity scales by `1/tau`.
 
 During optimization, spectral projection stays in the differentiable forward path. In eval
 mode, projected weights and biases are cached and detached so ordinary ODE solves do not
@@ -351,14 +357,15 @@ A small defect does not measure agreement with the Galerkin field or the origina
 
 ## Persistence contract
 
+Version-3 `.gns` checkpoints additionally store the fixed compact-support taper.
 Version-2 `.gns` checkpoints store the unit-ball-normalized network configuration, effective
 training radius, time scale, neural state, history, metrics, basis signature, dtype/device
 metadata, and reference-package revision. They deliberately do not serialize the weak-form
 callable or private numerical Galerkin evaluator. Loading therefore requires the same
 `NeuralSemigroupProblem` and operational basis.
 
-Keep schema-1 checkpoints loadable with their original unnormalized semantics; never
-reinterpret them as schema 2. Any schema change needs explicit versioning, round-trip tests,
+Keep schema-1 and schema-2 checkpoints loadable with their original semantics; never
+reinterpret them as schema 3. Any schema change needs explicit versioning, round-trip tests,
 old-checkpoint tests, and migration documentation. Treat the current basis signature as a
 compatibility guard, not a cryptographic/content proof of basis identity.
 
@@ -387,10 +394,12 @@ Do not infer field accuracy from a few good trajectories, nor trajectory accurac
 sampled field loss. Training loss and validation loss use normalized field coordinates; label
 them accordingly when comparing with physical units.
 
-For structure-bearing examples, add the correct independent observable: heat dissipation,
-wave energy, mass/mean conservation, equilibrium residual, boundary trace, or another
-problem-derived identity. `defect` is useful only for integration composition. Never invent a
-universal energy or claim that the sampled ball is positively invariant.
+For structure-bearing examples, add the correct independent observable: dissipation,
+mass/mean conservation, equilibrium residual, boundary trace, or another
+problem-derived identity. `defect` is useful only for integration composition. The
+compactly supported learned field is stationary outside the ball and its exact flow
+cannot cross the boundary; do not ascribe that property to the Galerkin field or to
+legacy checkpoints.
 
 Negative results are valid results. Do not silently alter sampling, add losses, shorten the
 time window, suppress warnings, or compare only favorable endpoints to make an experiment
@@ -406,7 +415,7 @@ baseline, and stiffness explicitly.
   fields, flow calls, projection/reconstruction delegation, defect, and checkpoints.
 - `src/galerkin_neural_semigroup/_network.py`: private tanh MLP, exact spectral projection,
   unit-ball wrapper, and eval cache.
-- `src/galerkin_neural_semigroup/_sampling.py`: the two fixed sampling laws and cached target
+- `src/galerkin_neural_semigroup/_sampling.py`: the three fixed sampling laws and cached target
   scaling.
 - `src/galerkin_neural_semigroup/_integration.py`: private explicit RK4 and Dormand--Prince
   integration.
@@ -546,7 +555,7 @@ Do not claim or silently add any of the following under the current contract:
 - alternative architectures, activations, optimizers, schedulers, or approximate spectral
   certificates presented as the implemented method;
 - user-visible construction or serialization of the numerical Galerkin reference;
-- automatic positive invariance of the training ball;
+- positive invariance of the Galerkin flow or of legacy unconstrained checkpoints;
 - uniform field-error certificates from finite validation loss;
 - convergence from the learned ODE to the original infinite-dimensional PDE;
 - implicit/IMEX integration or stiffness guarantees;
@@ -570,7 +579,7 @@ Flag any change that:
 - detaches differentiable input states or retains target/reference graphs;
 - loses arbitrary leading batch axes, dtype/device strictness, or finite checks;
 - confuses composition defect with model accuracy;
-- breaks schema-1 loading or schema-2 round trips;
+- breaks schema-1/schema-2 loading or schema-3 round trips;
 - advances the NGF pin without full cross-repository tests;
 - reports a scientific guarantee not established by the implementation.
 
