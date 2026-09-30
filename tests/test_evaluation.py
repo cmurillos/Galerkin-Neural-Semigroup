@@ -118,5 +118,31 @@ def test_evaluation_rejects_boundary_states_and_ambiguous_times():
     with pytest.raises(ValueError, match="times"):
         model.evaluate_trajectories(
             torch.tensor([[0.1, 0.0]], dtype=model.dtype),
-            torch.tensor([0.1, 0.0], dtype=model.dtype),
+            torch.tensor([0.1, 0.0, 0.2], dtype=model.dtype),
         )
+
+
+@pytest.mark.parametrize("times", [[-0.2, -0.1, 0.0], [0.0, -0.1, -0.2]])
+def test_evaluation_integrates_negative_times_in_either_direction(times):
+    model = reaction_model()
+    initial = torch.tensor([[0.2, 0.1], [-0.1, 0.3]], dtype=model.dtype)
+    times = torch.tensor(times, dtype=model.dtype)
+    report = model.evaluate_trajectories(initial, times, step=0.02, refine=True)
+    expected = (initial / model.radius)[None] * torch.exp(-(times - times[0]))[:, None, None]
+    torch.testing.assert_close(report["reference_states"], expected, atol=1e-9, rtol=1e-9)
+    torch.testing.assert_close(report["learned_states"], expected, atol=1e-9, rtol=1e-9)
+    assert torch.isfinite(report["reference_refinement"]).all()
+    torch.testing.assert_close(
+        model(initial[0], -0.2, step=0.02), initial[0] * torch.exp(times.new_tensor(0.2))
+    )
+
+
+def test_negative_time_exit_retains_prefix_and_survival():
+    model = reaction_model(radius=1.0, constant=True)
+    initial = torch.tensor([[-0.9, 0.0], [0.1, 0.0]], dtype=model.dtype)
+    times = torch.tensor([0.0, -0.05, -0.15], dtype=model.dtype)
+    report = model.evaluate_trajectories(initial, times, step=0.05, refine=True)
+    torch.testing.assert_close(report["learned_survival"], times.new_tensor([1.0, 1.0, 0.5]))
+    assert 0.0 > report["learned_exit_time"][0] > -0.11
+    assert torch.isnan(report["learned_states"][2, 0]).all()
+    assert torch.isfinite(report["learned_refinement"][:2, 0]).all()

@@ -1,5 +1,6 @@
 """The fixed autonomous MLP used by the method."""
 
+from contextlib import contextmanager
 from math import prod, sqrt
 
 import torch
@@ -33,6 +34,7 @@ class _SpectralMLP(nn.Module):
         self.biases = nn.ParameterList()
         self._evaluation_weights = None
         self._evaluation_biases = None
+        self._training_weights = None
         for input_width, output_width in zip(widths[:-1], widths[1:]):
             weight = torch.empty(output_width, input_width, device=device, dtype=dtype)
             bias = torch.empty(output_width, device=device, dtype=dtype)
@@ -71,7 +73,24 @@ class _SpectralMLP(nn.Module):
                         self._project(weight).detach() for weight in self.weights
                     )
             return self._evaluation_weights
+        if self._training_weights is not None:
+            return self._training_weights
         return tuple(self._project(weight) for weight in self.weights)
+
+    @contextmanager
+    def reuse_training_weights(self):
+        """Project once within a batch while retaining parameter gradients.
+
+        No projected graph survives an optimizer update. Ordinary calls and
+        checkpoint parameters keep their original semantics.
+        """
+        previous = self._training_weights
+        if self.training and previous is None:
+            self._training_weights = tuple(self._project(weight) for weight in self.weights)
+        try:
+            yield
+        finally:
+            self._training_weights = previous
 
     def effective_biases(self):
         if not self.training:
@@ -83,6 +102,7 @@ class _SpectralMLP(nn.Module):
     def _clear_evaluation_cache(self):
         self._evaluation_weights = None
         self._evaluation_biases = None
+        self._training_weights = None
 
     def train(self, mode=True):
         if not isinstance(mode, bool):

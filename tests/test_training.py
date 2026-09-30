@@ -6,7 +6,7 @@ import torch
 
 from galerkin_neural_semigroup import NeuralSemigroup
 from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
-from galerkin_neural_semigroup.problem import _basis_signature, _field_loss
+from galerkin_neural_semigroup.problem import _basis_signature, _field_loss, _target_storage
 
 from ._fixtures import heat_problem
 
@@ -26,6 +26,21 @@ class Quadratic(torch.nn.Module):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_large_indexed_target_cache_moves_to_host_only_when_needed(self):
+        device = torch.device("cuda")
+        self.assertEqual(
+            _target_storage(device, torch.float64, 32768, 40, 2, free_bytes=8 * 1024**3),
+            torch.device("cpu"),
+        )
+        self.assertEqual(
+            _target_storage(device, torch.float64, 32768, 40, 1, free_bytes=8 * 1024**3),
+            device,
+        )
+        self.assertEqual(
+            _target_storage(torch.device("cpu"), torch.float64, 32768, 40, 2),
+            torch.device("cpu"),
+        )
+
     def test_taylor_order_is_independent_of_training_sobolev_order(self):
         model = heat_problem(sobolev_order=0).train(
             hidden=(), lipschitz=2.0, samples=8, batch_size=4, epochs=1, device="cpu"
@@ -67,7 +82,7 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(semigroup.metadata["method"]["loss"], "mean-squared-indexed-sobolev-error")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
         self.assertEqual(
-            semigroup.metadata["reference_package"], "numerical-galerkin-field@f30e4735"
+            semigroup.metadata["reference_package"], "numerical-galerkin-field@83da38ee"
         )
         self.assertLessEqual(semigroup.metrics["effective_lipschitz_bound"], 2.0 * (1 + 1e-12))
         states = torch.tensor([[0.3, 0.2], [-0.1, 0.4]], dtype=semigroup.dtype)

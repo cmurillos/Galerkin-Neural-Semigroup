@@ -53,17 +53,43 @@ def _generator(device, seed):
 def _field_loss(field, states, targets, order):
     """Sample the usual integer-order H^k norm squared on the unit ball."""
     predicted = state_derivatives(field, states, order)
+    # Sum all output components and indexed derivatives before the one
+    # normalized-volume average. This is the same unweighted H^k objective.
     return sum(
-        (predicted[alpha] - targets[alpha]).square().sum(dim=-1).mean()
+        (predicted[alpha] - targets[alpha]).square().sum()
         for alpha in multi_indices(states.shape[-1], order)
+    ) / len(states)
+
+
+def _target_storage(device, dtype, count, dimension, order, *, free_bytes=None):
+    """Keep large fixed targets off GPU without changing their values or sampling."""
+    if device.type != "cuda":
+        return device
+    if free_bytes is None:
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+    needed = (
+        count
+        * dimension
+        * len(multi_indices(dimension, order))
+        * torch.empty((), dtype=dtype).element_size()
     )
+    return torch.device("cpu") if needed > free_bytes // 4 else device
+
+
+def _target_batch(targets, selection, device):
+    return {
+        alpha: values[
+            selection.to(values.device) if isinstance(selection, torch.Tensor) else selection
+        ].to(device=device, non_blocking=True)
+        for alpha, values in targets.items()
+    }
 
 
 def _mean_loss(field, states, targets, batch_size, order):
     total = torch.zeros((), device=states.device, dtype=torch.float64)
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
-        target = {alpha: value[start : start + batch_size] for alpha, value in targets.items()}
+        target = _target_batch(targets, slice(start, start + batch_size), states.device)
         total.add_(_field_loss(field, state, target, order).detach(), alpha=len(state))
     result = float((total / len(states)).item())
     if not isfinite(result):
@@ -216,12 +242,20 @@ class NeuralSemigroupProblem:
             device=device,
             dtype=dtype,
         )
+        target_storage = _target_storage(
+            device,
+            dtype,
+            samples + validation_samples,
+            self.dimension,
+            self.sobolev_order,
+        )
         train_targets = unit_ball_targets(
             coordinate_system,
             train_unit_states,
             radius=self.radius,
             order=self.sobolev_order,
             batch_size=batch_size,
+            storage_device=target_storage,
         )
         validation_targets = unit_ball_targets(
             coordinate_system,
@@ -229,6 +263,7 @@ class NeuralSemigroupProblem:
             radius=self.radius,
             order=self.sobolev_order,
             batch_size=batch_size,
+            storage_device=target_storage,
         )
 
         field = _LocalBallField(
@@ -256,14 +291,15 @@ class NeuralSemigroupProblem:
             epoch_total = torch.zeros((), device=device, dtype=torch.float64)
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
-                loss = _field_loss(
-                    field.core,
-                    train_unit_states[indices],
-                    {alpha: values[indices] for alpha, values in train_targets.items()},
-                    self.sobolev_order,
-                )
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                with field.core.reuse_training_weights():
+                    loss = _field_loss(
+                        field.core,
+                        train_unit_states[indices],
+                        _target_batch(train_targets, indices, device),
+                        self.sobolev_order,
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
                 optimizer.step()
                 epoch_total.add_(loss.detach(), alpha=len(indices))
             epoch_loss = float((epoch_total / samples).item())
@@ -350,12 +386,13 @@ class NeuralSemigroupProblem:
                 "seed": seed,
                 "optimizer": "Adam",
                 "target_mode": "cached",
+                "target_storage": str(target_storage),
                 "network_radius": 1.0,
                 "lipschitz_calibration": calibration,
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
-            "reference_package": "numerical-galerkin-field@f30e4735",
+            "reference_package": "numerical-galerkin-field@83da38ee",
         }
         return NeuralSemigroup(
             field=field,

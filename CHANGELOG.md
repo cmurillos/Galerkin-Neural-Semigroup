@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Accept held-out trajectories in either time direction, including negative
+  times, and reuse accepted states on numerical ball exit. Preserve normalized
+  reports and matched integration settings for both fields.
+- Sum the indexed H^k objective before the sample average; reuse exact
+  spectral projections within a training batch, and stream fixed reference
+  targets from CPU when the GPU cache would be large. Construct the learned
+  workflow through NGF's explicit compatible-flow contract.
 - Add a function-valued `System`/`Model` workflow with the same NGF basis,
   state, spatial evaluation and indexed coordinate derivative vocabulary.
   Group independent field and trajectory reports behind explicit methods,

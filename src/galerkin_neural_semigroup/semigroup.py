@@ -181,7 +181,7 @@ class NeuralSemigroup:
         """Compare normalized local flows on reserved data in physical time.
 
         Initial states have physical reduced coordinates ``[samples,N]``;
-        ``times`` is a strictly increasing tensor. Exit times and missing
+        ``times`` is a strictly monotone tensor, forwards or backwards in time. Exit times and missing
         values report numerical domain exit, not certified exact exit.
         """
         from ._evaluation import evaluate_trajectories

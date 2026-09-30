@@ -1,11 +1,37 @@
 import unittest
+from copy import deepcopy
 
 import torch
+from ngfield import multi_indices
 
 from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP, _UnitBallField
+from galerkin_neural_semigroup.problem import _field_loss
 
 
 class SpectralMLPTests(unittest.TestCase):
+    def test_projected_weights_are_reused_only_within_one_training_batch(self):
+        field = _SpectralMLP(2, (4, 4), 0.7, device=torch.device("cpu"), dtype=torch.float64)
+        baseline = deepcopy(field)
+        states = torch.tensor([[0.1, 0.2], [-0.2, 0.15]], dtype=field.dtype)
+        targets = {alpha: torch.zeros_like(states) for alpha in multi_indices(2, 2)}
+        expected = _field_loss(baseline, states, targets, 2)
+        expected.backward()
+
+        with field.reuse_training_weights():
+            first = field.effective_weights()
+            self.assertIs(first, field.effective_weights())
+            actual = _field_loss(field, states, targets, 2)
+            actual.backward()
+        self.assertIsNone(field._training_weights)
+        torch.testing.assert_close(actual, expected)
+        for optimized, original in zip(field.parameters(), baseline.parameters()):
+            torch.testing.assert_close(optimized.grad, original.grad)
+
+        with torch.no_grad():
+            field.weights[0].add_(0.01)
+        with field.reuse_training_weights():
+            self.assertIsNot(first, field.effective_weights())
+
     def test_local_field_uses_physical_coordinates_only_in_open_ball(self):
         core = _SpectralMLP(2, (), 2.0, device=torch.device("cpu"), dtype=torch.float64)
         field = _LocalBallField(core, radius=4.0, sobolev_order=2).eval()

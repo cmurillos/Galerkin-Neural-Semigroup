@@ -14,7 +14,7 @@ def sample_unit_ball(count, dimension, *, generator, device, dtype):
     return directions * radii.pow(1.0 / dimension)
 
 
-def unit_ball_targets(reference, states, *, radius, order, batch_size):
+def unit_ball_targets(reference, states, *, radius, order, batch_size, storage_device=None):
     """Cache all derivatives of ``g_R(x)=G(R*x)/R`` up to ``order``.
 
     For multi-index ``alpha`` the normalized derivative is
@@ -22,7 +22,8 @@ def unit_ball_targets(reference, states, *, radius, order, batch_size):
     differentiation, so the reference never enters the optimizer.
     """
     indices = multi_indices(states.shape[-1], order)
-    outputs = {alpha: torch.empty_like(states) for alpha in indices}
+    storage_device = states.device if storage_device is None else torch.device(storage_device)
+    outputs = {alpha: torch.empty_like(states, device=storage_device) for alpha in indices}
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
         derivatives = reference.state_derivatives(radius * state, order)
@@ -32,5 +33,5 @@ def unit_ball_targets(reference, states, *, radius, order, batch_size):
                 raise ValueError("The reference derivative changed the state shape.")
             if not bool(torch.isfinite(value).all()):
                 raise FloatingPointError("The reference derivative returned nonfinite data.")
-            outputs[alpha][start : start + len(state)].copy_(value)
+            outputs[alpha][start : start + len(state)].copy_(value.to(storage_device))
     return outputs

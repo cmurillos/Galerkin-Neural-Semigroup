@@ -3,7 +3,7 @@
 from types import MappingProxyType
 
 import torch
-from ngfield import Metrics
+from ngfield import FunctionalFlow
 from ngfield import System as NumericalSystem
 
 from ._network import OPEN_BALL_DOMAIN
@@ -95,10 +95,9 @@ class Model(NumericalSystem):
         if neural.field.configuration().get("domain") != OPEN_BALL_DOMAIN:
             raise ValueError("The function-valued workflow requires an open-ball schema-5 model.")
         self._neural = neural
-        self._field = neural._coordinate_system
-        self._dynamics = neural.field
-        self.radius = neural.radius
-        self.metrics = Metrics(self)
+        # Keep the public NumericalSystem relationship while initializing the
+        # compatible-flow contract without rebuilding the Galerkin field.
+        FunctionalFlow.__init__(self, neural._coordinate_system, neural.field, radius=neural.radius)
         self.evaluate = Evaluation(self)
 
     @property
@@ -112,14 +111,6 @@ class Model(NumericalSystem):
     @property
     def metadata(self):
         return self._neural.metadata
-
-    def _validate_state(self, z):
-        self._dynamics._states(z)
-
-    def _integration_radius(self, radius):
-        if radius is not None and radius != self.radius:
-            raise ValueError("The learned model's open-ball radius cannot be changed.")
-        return self.radius
 
     def save(self, path):
         self._neural.save(path)

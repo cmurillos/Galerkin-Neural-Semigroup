@@ -1,9 +1,11 @@
 import unittest
 
+import pytest
 import torch
 from ngfield import state_derivatives
 
 from galerkin_neural_semigroup._sampling import sample_unit_ball, unit_ball_targets
+from galerkin_neural_semigroup.problem import _target_batch
 
 
 class PolynomialReference:
@@ -53,3 +55,18 @@ class FixedSamplingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device unavailable")
+def test_host_target_storage_streams_identical_batches_to_cuda():
+    states = torch.tensor([[0.1, 0.2], [-0.3, 0.4]], dtype=torch.float64, device="cuda")
+    reference = PolynomialReference()
+    on_device = unit_ball_targets(reference, states, radius=3.0, order=2, batch_size=1)
+    on_host = unit_ball_targets(
+        reference, states, radius=3.0, order=2, batch_size=1, storage_device="cpu"
+    )
+    batches = _target_batch(on_host, torch.tensor([1, 0], device="cuda"), states.device)
+    for alpha, value in on_device.items():
+        torch.testing.assert_close(on_host[alpha], value.cpu())
+        torch.testing.assert_close(batches[alpha], value[[1, 0]])

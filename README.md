@@ -97,6 +97,7 @@ times = torch.linspace(0, 0.2, 21, dtype=model.dtype, device=model.device)
 path = model.evolve(initial, times, order=4)
 u_t = path.at(times[-1])
 values = u_t.values(points)
+all_values = path.values(points)  # reconstruct all times in one spatial lookup
 velocity = u_t.velocity()
 indexed = u_t.indexed_derivatives(2)
 ```
@@ -111,6 +112,8 @@ spatially. For explicit interoperability use `model.from_coefficients(z)`,
 recorded output time; it does not interpolate. The radius is fixed by the
 study; `path.exit_status()` reports the last numerical interior state when
 the local flow exits its open ball.
+The output times may increase or decrease and include negative values;
+`initial` is the state at the first requested time.
 
 `model.metrics` groups projection, reference quadrature and learned temporal
 refinement indicators, integral/radial rates and sampled neural Lipschitz
@@ -240,7 +243,8 @@ norms of both fields, and the network's separate spectral upper bound. The
 reference sampled maximum is **not** a global Lipschitz upper bound. Custom
 `radial_edges` may be passed; empty bins return `nan` with zero count.
 
-`evaluate_trajectories` reports trajectories, error mean and sample standard
+`evaluate_trajectories` accepts strictly increasing or decreasing output
+times, including negative times, and reports trajectories, error mean and sample standard
 deviation, same-state field error along learned paths, per-component integral
 and L²-norm changes, radial rates, exit times and survival fractions. The
 generic problem need not conserve integral or norm. Missing states after exit
@@ -254,6 +258,12 @@ is added to the training loss or saved checkpoint.
 Report projection, Galerkin truncation, neural field and time integration
 errors separately. A difference from the Galerkin reference is not a bound
 on error relative to the full PDE.
+
+For large indexed losses, GNS stores its fixed reference targets on CPU when
+they would consume a substantial share of free GPU memory, then transfers
+only the requested batch. This changes neither the sampled states nor the
+loss. Training still requires the live derivative graph for each batch and
+can be expensive at large `N` and `k`.
 
 ```bash
 python -m pytest

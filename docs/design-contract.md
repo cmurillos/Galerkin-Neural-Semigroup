@@ -151,7 +151,7 @@ underlying PDE.
 ## D-008 — Independent evaluation on the normalized ball
 
 The new local model accepts explicitly reserved physical-coordinate states in
-`evaluate_field(states)` and initial states and increasing times in
+`evaluate_field(states)` and initial states and strictly monotone times in
 `evaluate_trajectories(initial_states, times)`. All returned state, field,
 trajectory, integral and rate quantities use `x=z/R` and `g_R=G(Rx)/R`; time is
 unchanged. Evaluation neither trains nor changes saved training metrics. It
@@ -218,3 +218,21 @@ objects with methods for every D-008 family and `raw()` for all report keys.
 Evaluation is normalized on the unit ball. These report objects do not train
 or alter checkpoint metrics. Model training history and checkpoint metrics
 remain available separately.
+
+## D-010 — Internal efficiency and bilateral time evolution
+
+The public calls from D-009 remain the same. The loss computes one average
+after summing squared errors over every output component and multi-index;
+this is the same empirical norm of D-002 without derivative weights. The
+reference targets remain cached on fixed sampled states. If the GPU cannot
+comfortably hold them, they are stored on CPU and each selected batch is
+transferred without changing its values or sampling order. Exact spectral
+projections of a training network are reused within a batch and its backward
+pass; the associated graph is discarded before the next optimizer step.
+
+`Model` initializes `ngfield.FunctionalFlow` with a compatible autonomous
+field. Independent evaluation accepts strictly increasing or decreasing
+time grids, including negative values, with the initial state at the first
+requested time. Prefixes of paths that leave the ball come from NGF's
+already accepted output states. Reports retain the requested order and their
+normalized metrics; numerical exit times remain approximate.

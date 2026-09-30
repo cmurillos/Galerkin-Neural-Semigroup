@@ -3,6 +3,7 @@
 import pytest
 import torch
 from ngfield import Function, Geometry, Space, State
+from ngfield import System as NumericalSystem
 
 from galerkin_neural_semigroup import Model, System
 from tests.test_evaluation import reaction_model
@@ -11,6 +12,7 @@ from tests.test_evaluation import reaction_model
 def test_model_evolves_physical_functions_and_reconstructs_indexed_derivatives():
     neural = reaction_model(radius=2.0)
     model = Model(neural)
+    assert isinstance(model, NumericalSystem)
     initial = model.state(lambda x: 0.2 * torch.ones_like(x))
     times = torch.tensor([0.0, 0.1, 0.2], dtype=model.dtype)
     solution = model.evolve(initial, times, step=0.04, order=3)
@@ -27,6 +29,9 @@ def test_model_evolves_physical_functions_and_reconstructs_indexed_derivatives()
     assert state.hessian(points).shape == (2, 1, 1, 1)
     assert state.integral().shape == (1,)
     assert not solution.exit_status()["exited"]
+    torch.testing.assert_close(
+        solution.values(points), torch.stack([solution.at(time).values(points) for time in times])
+    )
 
     indexed = model.indexed_derivatives(state, 2)
     assert tuple(indexed) == ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2))

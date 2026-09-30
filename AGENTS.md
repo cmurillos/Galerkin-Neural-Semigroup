@@ -91,6 +91,12 @@ fields may require a different problem-specific solver study.
 All state tensors have shape `[...,N]`, with arbitrary batch axes. Preserve
 strict device/dtype, finite-value and shape checks. Inputs may require state
 gradients; do not detach them for convenience. Avoid per-state Python loops.
+Independent trajectory evaluation accepts strictly monotone time grids in
+either direction, including negative times. Fixed reference targets may be
+cached on CPU for large GPU studies; batches must return to the model device
+without changing samples, indexed weights or parameter gradients. A training
+batch may reuse the exact projected weights, but the cached graph must not
+survive an optimizer step.
 
 ## Compatibility and reproducibility
 

@@ -120,18 +120,10 @@ def _population(field, states, times, *, radius, order, step, tolerance):
                 return
             index = int(indices[0])
             exit_times[index] = exc.time
-            length = int((times <= exc.time).sum().item())
-            # A prefix ends at an output time already accepted by the solver.
-            if length:
-                paths[:length, index] = integrate_field(
-                    field,
-                    states[index],
-                    times[:length],
-                    radius=radius,
-                    order=order,
-                    step=step,
-                    tolerance=tolerance,
-                )
+            # NGF retains completed outputs in the original integration order,
+            # including backward paths. Reuse them instead of solving again.
+            completed = exc.completed_states
+            paths[: len(completed), index] = completed[:, 0].detach()
         else:
             paths[:, indices] = solved.detach()
 
@@ -188,7 +180,7 @@ def _refinement(field, states, times, *, radius, order, step, tolerance):
                 fill(indices[middle:])
                 return
             index = int(indices[0])
-            length = int((times <= exc.time).sum().item())
+            length = len(exc.completed_times)
             while length:
                 try:
                     result[:length, index] = time_error(
@@ -224,9 +216,11 @@ def evaluate_trajectories(
         or times.device != model.device
         or times.dtype != model.dtype
         or not bool(torch.isfinite(times).all())
-        or not bool(torch.all(times[1:] > times[:-1]))
+        or not (bool(torch.all(times[1:] > times[:-1])) or bool(torch.all(times[1:] < times[:-1])))
     ):
-        raise ValueError("times must be a finite, increasing tensor [T] on the model device.")
+        raise ValueError(
+            "times must be a finite, strictly monotone tensor [T] on the model device."
+        )
     if not isinstance(refine, bool):
         raise TypeError("refine must be a boolean.")
     reference = model._coordinate_system
