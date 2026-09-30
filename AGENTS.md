@@ -56,8 +56,11 @@ The Taylor integration order `p` is independent of `k`.
 `NeuralSemigroupProblem(basis=..., weak=..., radius=R, sobolev_order=k,
 quadrature=...)` is the public problem definition. `from_galerkin` supports
 explicit historical/general NGF problems while keeping the reference private.
-Users should import only the two exported GNS classes plus public NGF space and
-form symbols; examples must not construct or expose the reference evaluator.
+The original coordinate API exports `NeuralSemigroupProblem` and
+`NeuralSemigroup`. The D-009 function-valued API also exports `System`,
+`Model`, NGF `State`/`Function`/`Solution` and NGF geometry, space, restrictions
+and weak-form vocabulary. Examples must not construct or expose the reference
+evaluator.
 
 The normalized network is an autonomous `tanh` MLP with exact spectral weight
 projection. Adam trains on one fixed volume sample; validation uses a distinct
@@ -113,6 +116,8 @@ make an experiment look favorable.
 - `semigroup.py`: public learned flow and versioned checkpoints.
 - `_evaluation.py`: independent normalized field and trajectory diagnostics;
   obtain reference derivatives, integral weights and integration from NGF.
+- `workflow.py`: function-valued study and learned flow, NGF functional types,
+  indexed derivative option, grouped independent evaluation reports.
 - `docs/design-contract.md`: mathematical contract and limitations.
 
 For simultaneous sibling checkouts, install NGF from its local source and GNS

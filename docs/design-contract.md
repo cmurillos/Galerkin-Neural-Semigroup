@@ -181,3 +181,40 @@ last requested time. The time recorded by the solver is a numerical last
 interior time, not the exact first exit. Optional time-step refinement is a
 numerical indicator, not a certified error bound; a refined trajectory may
 exit before its coarse counterpart.
+
+## D-009 — Function-valued study and indexed derivative option
+
+`Geometry`, `Space`, restrictions and weak-form operators exposed by GNS
+refer to the exact NGF objects. `System(basis,weak,radius,sobolev_order,...)`
+defines a study, `study.train(...)` produces a function-valued `Model`, and
+`study.load(path)` reconstitutes a matching schema-5 model. The historical
+`NeuralSemigroupProblem` and `NeuralSemigroup` remain available unchanged.
+The new workflow requires an open-ball schema-5 model; it does not reinterpret
+the historical time and taper semantics of schemas 1–4.
+
+`model.state(u0)` projects a physical initial function, while
+`model.from_coefficients(z)` explicitly accepts coordinates `[...,N]` strictly
+inside the model's ball. These NGF `State`, `Function` and `Solution` types
+perform the same spatial evaluation, componentwise integral and L² norm as
+the numerical workflow. `model.evolve(initial,times,order,step|tolerance)`
+uses the shared Taylor integrator and returns only completed requested times
+if a numerical boundary exit occurs. `solution.exit_status()` then also
+contains the last accepted interior state and time. `solution.at(t)` accepts
+only recorded output times; it does not interpolate.
+
+For `z=state.coefficients()`, `state.velocity()` represents the physical
+learned velocity `Fθ(z)`. `state.indexed_derivatives(k)` maps every
+`|alpha|<=k` to the function with coefficients `∂_z^alpha Fθ(z)`. These
+derivatives are not normalized-unit-ball loss derivatives: for the loss
+coordinates `x=z/R`, the exact conversion follows D-002. A derivative vector
+is a function in `V_N`, not necessarily a phase state inside the ball. The
+temporal Taylor order remains independent of `k`.
+
+`model.metrics` delegates projection and reference quadrature indicators to
+NGF, and its time refinement and rates to the learned field in physical
+coordinates; sampled Lipschitz is a finite sample maximum. The separate
+`model.evaluate.field(...)` and `.trajectories(...)` return structured report
+objects with methods for every D-008 family and `raw()` for all report keys.
+Evaluation is normalized on the unit ball. These report objects do not train
+or alter checkpoint metrics. Model training history and checkpoint metrics
+remain available separately.

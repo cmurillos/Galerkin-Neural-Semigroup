@@ -60,6 +60,83 @@ L² norm of the reconstructed reduced state. It is not a radius in physical spac
 Changing `R` changes the target function in general, so it normally requires
 training again.
 
+## Function-valued workflow
+
+GNS offers the same geometry, space, basis and weak-form vocabulary as NGF;
+these names are direct reexports of NGF, so a basis can be used in either
+library. A study adds training before it can evolve physical functions:
+
+```python
+import galerkin_neural_semigroup as gns
+
+geometry = gns.Geometry(vertices, simplices)
+V = gns.Space(
+    geometry=geometry,
+    components=1,
+    restrictions=[gns.ZeroTrace(component=0, boundary="all")],
+)
+basis = V.basis("laplacian", size=4, degree=1)
+
+
+def weak(u, v, dx, ds):
+    return -0.05 * gns.inner(gns.grad(u[0]), gns.grad(v[0])) * dx
+
+
+study = gns.System(basis=basis, weak=weak, radius=1.5, sobolev_order=1)
+model = study.train(
+    hidden=(64, 64),
+    lipschitz="auto",
+    samples=10_000,
+    batch_size=256,
+    epochs=1_000,
+    lr=1e-3,
+    seed=0,
+)
+initial = model.state(lambda x: torch.sin(torch.pi * x[:, :1]))
+times = torch.linspace(0, 0.2, 21, dtype=model.dtype, device=model.device)
+path = model.evolve(initial, times, order=4)
+u_t = path.at(times[-1])
+values = u_t.values(points)
+velocity = u_t.velocity()
+indexed = u_t.indexed_derivatives(2)
+```
+
+Here `u_t` is a phase `State`, while `velocity` and every entry in `indexed`
+are `Function` objects in the same basis. The keys are all multi-indices
+`|alpha|<=2`, including the zero index, and the functions represent
+`∂_z^alpha Fθ(z)` in **physical reduced coordinates**. These are distinct
+from `u_t.gradient(points)` and `u_t.hessian(points)`, which differentiate
+spatially. For explicit interoperability use `model.from_coefficients(z)`,
+`u_t.coefficients()` and `path.coefficients()`. `path.at(t)` requires a
+recorded output time; it does not interpolate. The radius is fixed by the
+study; `path.exit_status()` reports the last numerical interior state when
+the local flow exits its open ball.
+
+`model.metrics` groups projection, reference quadrature and learned temporal
+refinement indicators, integral/radial rates and sampled neural Lipschitz
+diagnostics. Independent held-out evaluation has a structured route:
+
+```python
+field = model.evaluate.field(states_test, radial_edges=None)
+field.rmse(), field.derivatives(by_order=True), field.sobolev()
+field.radial(), field.lipschitz()
+
+flow = model.evaluate.trajectories(initial_states_test, times, order=4, refine=True)
+flow.error(), flow.field_on_paths(), flow.integrals(), flow.norms()
+flow.exits(), flow.time_refinement()
+```
+
+`states_test` and `initial_states_test` are held-out tensors `[samples,N]` in
+physical reduced coordinates, or function-valued `State` objects from this
+model. These report methods use the normalized unit-ball metrics described
+below; `model.metrics` and `State` observables use physical coordinates.
+`field.raw()` and `flow.raw()` expose all existing report tensors. To persist
+the model use `model.save(path)` and `study.load(path)`; training history and
+metrics are available separately as `model.training_history` and
+`model.training_metrics`. The original `NeuralSemigroupProblem`/
+`NeuralSemigroup` coordinate API remains available.
+See the executable [function-valued example](examples/functional_workflow.py).
+
 ## Loss and normalization
 
 Write `z=Rx`, with `x` in the open unit ball `B_N(1)`. For the numerical Galerkin

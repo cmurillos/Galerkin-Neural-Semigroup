@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a function-valued `System`/`Model` workflow with the same NGF basis,
+  state, spatial evaluation and indexed coordinate derivative vocabulary.
+  Group independent field and trajectory reports behind explicit methods,
+  while preserving the coordinate and checkpoint APIs.
 - Add independent, normalized field and trajectory evaluation against the
   private NGF reference, including derivative/radial profiles, sampled
   Lipschitz diagnostics, per-component integrals, L² rates, numerical ball

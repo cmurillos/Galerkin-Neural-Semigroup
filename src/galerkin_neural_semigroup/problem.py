@@ -355,7 +355,7 @@ class NeuralSemigroupProblem:
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
-            "reference_package": "numerical-galerkin-field@136be8e9",
+            "reference_package": "numerical-galerkin-field@f30e4735",
         }
         return NeuralSemigroup(
             field=field,
