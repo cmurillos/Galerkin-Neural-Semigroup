@@ -140,9 +140,43 @@ sobolev_order=k)`; the reference evaluator remains private.
 
 ## Validation and development
 
-Compare the learned field with the Galerkin field on independent states, and
-compare trajectories using matched integrator settings. Separately report
-projection, Galerkin truncation, neural field, and time integration errors.
+Evaluate on states and initial conditions reserved separately from **both**
+training and checkpoint-selection validation. Public inputs use physical reduced
+coordinates, while every returned state, field error, integral, norm and rate
+uses the unit-ball coordinates `x=z/R`. Time is unchanged:
+
+```python
+test_states = model.radius * torch.tensor(
+    [[0.1, 0.2, 0.0, 0.0], [-0.2, 0.1, 0.2, 0.0]],
+    dtype=model.dtype,
+    device=model.device,
+)
+field_report = model.evaluate_field(test_states)
+flow_report = model.evaluate_trajectories(test_states, times, order=4, refine=True)
+print(field_report["field_rmse"], field_report["derivative_rmse_by_order"])
+print(flow_report["trajectory_error_mean"], flow_report["common_count"])
+```
+
+`evaluate_field` reports RMS field error, one derivative RMS value per order
+`0,...,k`, the aggregate H^k RMS, radial bins on `[0,1)`, sampled derivative
+norms of both fields, and the network's separate spectral upper bound. The
+reference sampled maximum is **not** a global Lipschitz upper bound. Custom
+`radial_edges` may be passed; empty bins return `nan` with zero count.
+
+`evaluate_trajectories` reports trajectories, error mean and sample standard
+deviation, same-state field error along learned paths, per-component integral
+and L²-norm changes, radial rates, exit times and survival fractions. The
+generic problem need not conserve integral or norm. Missing states after exit
+are `nan`; missing exit times mean no exit was observed by the final requested
+time. Aggregates include the number of common surviving trajectories, so an
+error curve is not mistaken for a fixed cohort. The optional `refine=True`
+adds NGF's temporal step/tolerance refinement indicator for both fields; it
+can be expensive and is not a certified error bound. None of these statistics
+is added to the training loss or saved checkpoint.
+
+Report projection, Galerkin truncation, neural field and time integration
+errors separately. A difference from the Galerkin reference is not a bound
+on error relative to the full PDE.
 
 ```bash
 python -m pytest

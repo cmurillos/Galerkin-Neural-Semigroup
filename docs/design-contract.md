@@ -147,3 +147,37 @@ where both trajectories exist. A small empirical H^k loss alone gives no
 uniform field certificate or trajectory bound. Even a good Galerkin-field
 surrogate does not establish convergence of the Galerkin approximation to the
 underlying PDE.
+
+## D-008 — Independent evaluation on the normalized ball
+
+The new local model accepts explicitly reserved physical-coordinate states in
+`evaluate_field(states)` and initial states and increasing times in
+`evaluate_trajectories(initial_states, times)`. All returned state, field,
+trajectory, integral and rate quantities use `x=z/R` and `g_R=G(Rx)/R`; time is
+unchanged. Evaluation neither trains nor changes saved training metrics. It
+does not sample outside the open ball, infer an invariant, or claim independent
+data if the caller reuses training or validation states.
+
+Field evaluation reports RMS value error, RMS indexed derivative errors for
+each `0 <= r <= k`, their H^k sum, a profile in normalized radial intervals,
+and maximum sampled operator norms of first derivatives for both fields.
+NGF supplies the reference indexed derivatives; GNS evaluates the learned
+ones. The maximum sampled norm of `Dg_R` is an empirical lower estimate of its
+supremum, not a certified global Lipschitz upper bound. The existing network
+spectral bound is reported separately. Empty radial bins have zero count and
+an undefined (`nan`) RMS value.
+
+Trajectory evaluation uses NGF's same Taylor integrator, order, times and
+step/tolerance settings on both fields. It reports normalized trajectory
+errors, same-state field and radial-rate gaps along learned paths, the
+normalized `L²` norm and its rate `x·X(x)`, and per-component integrals using
+`G.integral_weights()`. Integral and norm changes from the initial state are
+observations; the generic weak problem need not conserve either quantity.
+Both integrations stop at the open-ball boundary. Each output-time aggregate
+is conditioned on trajectories for which the required states still exist;
+the counts and separate survival fractions accompany these values. Missing
+states are `nan`, and a missing exit time means no exit was observed by the
+last requested time. The time recorded by the solver is a numerical last
+interior time, not the exact first exit. Optional time-step refinement is a
+numerical indicator, not a certified error bound; a refined trajectory may
+exit before its coarse counterpart.

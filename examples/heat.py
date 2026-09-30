@@ -35,9 +35,22 @@ def main():
     z0 = semigroup.project(lambda x: torch.sin(torch.pi * x[:, :1]))
     times = torch.linspace(0, 0.2, 21, dtype=semigroup.dtype, device=semigroup.device)
     states = semigroup.solve(z0, times, order=4)
+    reserved = semigroup.radius * torch.tensor(
+        [[0.1, 0.2, 0.0, 0.0], [-0.2, 0.1, 0.2, 0.0]],
+        dtype=semigroup.dtype,
+        device=semigroup.device,
+    )
+    field_report = semigroup.evaluate_field(reserved)
+    trajectory_report = semigroup.evaluate_trajectories(reserved, times, order=4)
     print(semigroup)
     print(dict(semigroup.metrics))
     print(states.shape)
+    print("Reserved field RMS:", field_report["field_rmse"])
+    print(
+        "Trajectory mean and surviving count:",
+        trajectory_report["trajectory_error_mean"][-1],
+        trajectory_report["common_count"][-1],
+    )
 
 
 if __name__ == "__main__":

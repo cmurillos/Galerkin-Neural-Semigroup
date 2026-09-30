@@ -111,6 +111,8 @@ make an experiment look favorable.
 - `_network.py`: projected MLP, new local wrapper and historical wrappers.
 - `_lipschitz.py`: sampled first-derivative spectral calibration.
 - `semigroup.py`: public learned flow and versioned checkpoints.
+- `_evaluation.py`: independent normalized field and trajectory diagnostics;
+  obtain reference derivatives, integral weights and integration from NGF.
 - `docs/design-contract.md`: mathematical contract and limitations.
 
 For simultaneous sibling checkouts, install NGF from its local source and GNS

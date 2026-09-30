@@ -67,7 +67,7 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(semigroup.metadata["method"]["loss"], "mean-squared-indexed-sobolev-error")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
         self.assertEqual(
-            semigroup.metadata["reference_package"], "numerical-galerkin-field@a466f135"
+            semigroup.metadata["reference_package"], "numerical-galerkin-field@136be8e9"
         )
         self.assertLessEqual(semigroup.metrics["effective_lipschitz_bound"], 2.0 * (1 + 1e-12))
         states = torch.tensor([[0.3, 0.2], [-0.1, 0.4]], dtype=semigroup.dtype)

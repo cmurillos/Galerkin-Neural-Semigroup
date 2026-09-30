@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add independent, normalized field and trajectory evaluation against the
+  private NGF reference, including derivative/radial profiles, sampled
+  Lipschitz diagnostics, per-component integrals, L² rates, numerical ball
+  exit/survival and optional matched temporal refinement. Keep these metrics
+  separate from the training objective and persisted model metrics.
+
 - Train the normalized reduced field with the unweighted, indexed H^k loss;
   source Galerkin state derivatives from NGF and cache scaled targets.
 - Use fixed normalized-volume sampling and an open-ball local field for new

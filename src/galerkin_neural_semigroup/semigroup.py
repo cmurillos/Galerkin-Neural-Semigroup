@@ -164,6 +164,38 @@ class NeuralSemigroup:
         )
         return composed - direct
 
+    def evaluate_field(self, states, *, radial_edges=None, batch_size=128):
+        """Evaluate normalized errors on explicitly reserved interior states.
+
+        ``states`` has physical reduced coordinates ``[samples,N]``. The
+        returned metrics refer to the normalized unit ball and do not enter
+        training or the saved checkpoint.
+        """
+        from ._evaluation import evaluate_field
+
+        return evaluate_field(self, states, radial_edges=radial_edges, batch_size=batch_size)
+
+    def evaluate_trajectories(
+        self, initial_states, times, *, step=None, tolerance=None, order=4, refine=False
+    ):
+        """Compare normalized local flows on reserved data in physical time.
+
+        Initial states have physical reduced coordinates ``[samples,N]``;
+        ``times`` is a strictly increasing tensor. Exit times and missing
+        values report numerical domain exit, not certified exact exit.
+        """
+        from ._evaluation import evaluate_trajectories
+
+        return evaluate_trajectories(
+            self,
+            initial_states,
+            times,
+            step=step,
+            tolerance=tolerance,
+            order=order,
+            refine=refine,
+        )
+
     def save(self, path):
         """Save network parameters and reproducibility metadata, but not the oracle."""
         target = Path(path)
