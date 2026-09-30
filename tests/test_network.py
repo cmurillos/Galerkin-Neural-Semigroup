@@ -2,10 +2,21 @@ import unittest
 
 import torch
 
-from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
+from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP, _UnitBallField
 
 
 class SpectralMLPTests(unittest.TestCase):
+    def test_local_field_uses_physical_coordinates_only_in_open_ball(self):
+        core = _SpectralMLP(2, (), 2.0, device=torch.device("cpu"), dtype=torch.float64)
+        field = _LocalBallField(core, radius=4.0, sobolev_order=2).eval()
+        state = torch.tensor([1.0, -1.0], dtype=torch.float64, requires_grad=True)
+        torch.testing.assert_close(field(state), 4.0 * core(state / 4.0))
+        field(state).sum().backward()
+        self.assertTrue(torch.isfinite(state.grad).all())
+        self.assertEqual(field.configuration()["sobolev_order"], 2)
+        with self.assertRaisesRegex(ValueError, "open ball"):
+            field(torch.tensor([4.0, 0.0], dtype=torch.float64))
+
     def test_shape_gradient_and_global_budget(self):
         field = _SpectralMLP(
             4,

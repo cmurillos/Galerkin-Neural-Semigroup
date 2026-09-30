@@ -1,211 +1,148 @@
 # Galerkin Neural Semigroup
 
-Galerkin Neural Semigroup learns an autonomous reduced vector field from a complete
-weak formulation and obtains time evolution by integrating that field. The public
-workflow never exposes the numerical Galerkin field used as supervision:
+Galerkin Neural Semigroup (GNS) trains an autonomous neural field against the
+numerical Galerkin field supplied internally by
+[Numerical Galerkin Field](https://github.com/cmurillos/Numerical-Galerkin-Field)
+(NGF). Training uses values and **indexed state derivatives** of the fields on a
+reduced coordinate ball. It does not use trajectories as targets or introduce
+time as a network input.
 
-```text
-weak problem + fixed basis -> private reference evaluations -> neural field -> flow
-```
+This is early research software. Field errors on finite samples do not certify
+trajectory accuracy or convergence to the original PDE.
 
-The network is a `tanh` multilayer perceptron with exact spectral projection. Its
-base Lipschitz budget is `L`. A fixed smooth taper starts at the training radius `R`
-and makes the deployed field zero at and outside radius `2R`; it remains
-globally Lipschitz, although its certified bound may exceed `L`. The autonomous ODE is
-globally well posed and its
-continuous flow satisfies identity and composition by construction. Training directly
-matches the neural and Galerkin fields on one of three fixed measures of the reduced ball;
-it does not generate reference trajectories or field derivatives.
+## Install
 
-This repository is early research software. The mathematical and numerical contracts
-are explicit, but empirical claims will be added only after dedicated experiments.
-
-## Source installation
-
-Python 3.11 or newer is required. Until the post-D-013 version of Numerical Galerkin
-Field is released, the dependency is pinned to the exact source revision used here:
+Python 3.11 or newer:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-The distribution is named `galerkin-neural-semigroup`; its Python import is
-`galerkin_neural_semigroup`.
+The NGF dependency is pinned to an exact source commit until the new derivative
+and integration APIs are released.
 
-## Compact API
-
-The user prepares the geometry, admissible space and fixed operational basis with
-[`ngfield`](https://github.com/cmurillos/Numerical-Galerkin-Field). The basis already
-carries geometry, physical components and homogeneous restrictions, so these data are
-not repeated in the learning problem.
+## Example
 
 ```python
 import numpy as np
 import torch
-
-from galerkin_neural_semigroup import NeuralSemigroupProblem
 from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
-
+from galerkin_neural_semigroup import NeuralSemigroupProblem
 
 vertices = np.linspace(0, 1, 17)[:, None]
 simplices = np.column_stack((np.arange(16), np.arange(1, 17)))
-geometry = SimplicialDomain(vertices=vertices, simplices=simplices)
-V = Space(
-    geometry=geometry,
-    components=1,
-    restrictions=[ZeroTrace(component=0, boundary="all")],
+geometry = SimplicialDomain(vertices, simplices)
+space = Space(
+    geometry=geometry, components=1, restrictions=[ZeroTrace(component=0, boundary="all")]
 )
-basis = V.basis("laplacian", size=4, degree=1)
+basis = space.basis("laplacian", size=4, degree=1)
 
 
 def weak(u, v, dx, ds):
     return -0.05 * inner(grad(u[0]), grad(v[0])) * dx
 
 
-problem = NeuralSemigroupProblem(
-    basis=basis,
-    weak=weak,
-    radius=1.5,
+problem = NeuralSemigroupProblem(basis=basis, weak=weak, radius=1.5, sobolev_order=1)
+model = problem.train(
+    hidden=(64, 64), lipschitz="auto", samples=10_000, batch_size=256, epochs=1_000, lr=1e-3, seed=0
 )
-
-semigroup = problem.train(
-    hidden=(64, 64),
-    lipschitz="auto",
-    samples=10_000,
-    sampling="volume",
-    batch_size=256,
-    epochs=1_000,
-    lr=1e-3,
-    seed=0,
-)
+z0 = model.project(lambda x: torch.sin(torch.pi * x[:, :1]))
+times = torch.linspace(0, 0.2, 21, dtype=model.dtype, device=model.device)
+Z = model.solve(z0, times, order=4)
+points = torch.linspace(0, 1, 101, dtype=model.dtype, device=model.device)[:, None]
+U = model.reconstruct(Z, points)
 ```
 
-`basis.dimension` determines both the input and output dimensions. The network is always
-trained in normalized coordinates `x = z / R`, so its input domain has radius one even
-when the physical reduced domain has radius `R`. Sampling has three fixed,
-non-adaptive options. If `U` is uniform on `(0,1)` and `xi` is a standard Gaussian
-direction, all are generated in vectorized operations:
+The basis fixes the reduced dimension `N`, admissible physical space and component
+shapes. GNS constructs the Galerkin reference privately. `radius=R` is the
+**reduced-coordinate** radius; for an L²-orthonormal basis it also represents the
+L² norm of the reconstructed reduced state. It is not a radius in physical space.
+Changing `R` changes the target function in general, so it normally requires
+training again.
 
-| `sampling` | Unit radius | Physical radius | Measure |
-| --- | --- | --- | --- |
-| `"volume"` | `U**(1/N)` | `R * U**(1/N)` | Normalized volume (default). |
-| `"radius"` | `U` | `R * U` | Uniform radius and uniform angle. |
-| `"mixed"` | 50/50 choice of the preceding radii | `R` times that choice | Equal mixture of both measures. |
+## Loss and normalization
 
-In all cases `x = q * xi / ||xi||` and the reference is evaluated at the physical state
-`z = R * x`. Training and validation states are drawn once from independent samples of
-the selected measure and are not adapted or resampled. For `time_scale = tau`, the
-normalized target and the only learning objective are
+Write `z=Rx`, with `x` in the open unit ball `B_N(1)`. For the numerical Galerkin
+field `G: ℝ^N → ℝ^N` and the neural field `fθ` on `B_N(1)`, define
 
 ```text
-G_hat(x) = (tau / R) * G(R * x),
-mean_i ||F_hat_theta(x_i) - G_hat(x_i)||_2^2.
+g_R(x) = G(Rx)/R,                         Fθ(z) = R fθ(z/R),
+∂_x^α g_R(x) = R^(|α|-1) ∂_z^α G(Rx).
 ```
 
-It is evaluated over tensor batches, with no angular, relative, Jacobian or adaptive
-term. The `tanh` architecture, exact spectral projection and Adam optimizer remain
-fixed method decisions. By default, `lipschitz="auto"` estimates local difference
-quotients of the private Galerkin field at independent states and gives the base
-network 1.5 times the largest observed normalized slope. This is an empirical
-estimate, **not** a certified upper bound for a nonlinear field; pass a positive
-number as `lipschitz` to set the spectral budget manually. The optional
-`lipschitz_factor` changes the default 1.5 margin. The estimate, margin, and
-chosen budget appear in `semigroup.metadata["training"]["lipschitz_calibration"]`.
-The normalization is transparent to the public API:
+The objective approximates the usual integer Sobolev norm by a fixed sample:
 
 ```text
-semigroup.field(z) = chi(||z||_2/R) * R * F_hat_theta(P(z / R)),
-P(x) = x / max(1, ||x||_2).
+||fθ-g_R||²_H^k(B_N(1))
+  = ∫_{B_N(1)} Σ_{|α|≤k} ||∂_x^α fθ(x) - ∂_x^α g_R(x)||²₂ dx,
+
+L_B(θ) = (1/B) Σ_{i=1}^B Σ_{|α|≤k}
+         ||∂_x^α fθ(x_i) - ∂_x^α g_R(x_i)||²₂.
 ```
 
-Here `chi=1` through radius `R`, decreases smoothly to zero at `2R`, and
-vanishes beyond. The projection `P` prevents evaluation on network inputs
-outside the training ball. Inside `R` the deployed field exactly matches the
-raw network, including the boundary. Training and validation losses retain
-their original meaning. Trajectories may leave the training ball, but the
-continuous learned flow cannot cross the stationary boundary at `2R`.
-The taper's global Lipschitz bound may exceed the base network budget.
+Each multi-index occurs once; there are no factorial or ad hoc derivative weights.
+The empirical loss estimates the integral divided by the volume of the ball.
+NGF computes the reference derivatives and the indexed list. GNS caches detached
+reference targets; its network derivatives remain differentiable with respect to
+network parameters. The physical state space remains the L²-based Galerkin space:
+`H^k` here concerns **derivatives with respect to reduced state coordinates**, not
+spatial Sobolev regularity of the PDE solution.
 
-## Evolution and reconstruction
+Training and validation draw independent fixed samples from normalized volume on
+the ball. If `ξ` is Gaussian and `s` uniform on `(0,1)`, then
+`x=s^(1/N) ξ/||ξ||₂`. Adam trains the `tanh` MLP with exact spectral projection;
+validation selects the best epoch. The `lipschitz="auto"` budget estimates
+`||Dg_R||₂` at sampled points using indexed derivatives. Its optional margin is
+heuristic, not a certified bound for `G`; a positive numeric budget may be supplied.
+
+## Local flow and comparable integration
+
+`model.field(z)` and `model.velocity(z)` both give the learned physical-time
+field `Fθ(z)`. They are defined only when `||z||₂<R`. They raise at the boundary
+or outside it. `solve` integrates locally and raises `ngfield.DomainExitError`
+when a numerical step reaches the boundary. The error records the last accepted
+interior state and time; it does not certify the exact exit instant. No value of
+`Fθ` outside the ball is evaluated.
+
+Both `G.solve` and `model.solve` call **the same NGF Taylor-jet integrator** in
+physical time. Use the same `times`, `order`, `step` or `tolerance`, and optionally
+`radius=R` on `G.solve`, for temporal comparisons:
 
 ```python
-z0 = semigroup.project(lambda x: torch.sin(torch.pi * x[:, :1]))
-times = torch.linspace(0, 0.2, 21, dtype=semigroup.dtype, device=semigroup.device)
-
-Z = semigroup.solve(z0, times)  # adaptive Dormand--Prince 5(4)
-Z_rk4 = semigroup.solve(z0, times, step=1e-3)
-
-points = torch.linspace(0, 1, 101, dtype=semigroup.dtype, device=semigroup.device).reshape(-1, 1)
-U = semigroup.reconstruct(Z, points)
+Z = model.solve(z0, times, order=4, step=1e-3)  # fixed maximum step
+Z = model.solve(z0, times, order=4, tolerance=1e-8)  # adaptive step
 ```
 
-The learned scaled field is available as `semigroup.field(z)` in the original reduced
-coordinates. When `time_scale` is not one, `semigroup.velocity(z)` returns the
-corresponding physical-time velocity.
-The composition diagnostic
+The integrator uses `J₁[X]=X` and `J_{r+1}[X]=DJ_r[X]·X` to form the Taylor
+polynomial of degree `p=order`; adaptive stepping estimates the first omitted
+term. The time order `p` and Sobolev training order `k` are independent choices.
+The adaptive estimate is a heuristic, not a rigorous global error bound. Explicit
+Taylor integration may be inefficient or fail for stiff dynamics. The exact
+local flow has identity and composition where defined; `model.defect(z,s,t)`
+is a numerical integration diagnostic.
+
+## Persistence and older models
 
 ```python
-defect = semigroup.defect(z0, 0.04, 0.07)
-```
-
-measures integration and roundoff error; the exact continuous flow itself satisfies
-the composition law.
-
-## Checkpoints
-
-```python
-semigroup.save("heat.gns")
+model.save("heat.gns")
 restored = problem.load("heat.gns")
 ```
 
-A checkpoint contains the neural parameters, architecture, training history and
-reproducibility metadata. It deliberately does not serialize the private reference
-evaluator. Loading therefore requires the same problem and operational basis.
+Schema 5 stores the open domain and Sobolev order along with network state,
+training metadata and basis signature. Loading requires a compatible problem and
+basis; the signature cannot prove arbitrary basis functions are identical. Schemas
+1–4 remain loadable with their **historical** time scaling and support rules.
+New models do not have a time scale or an exterior taper.
 
-## Advanced compatibility route
+For an explicit older `ngfield.GalerkinProblem`, use
+`NeuralSemigroupProblem.from_galerkin(problem, basis=basis, radius=R,
+sobolev_order=k)`; the reference evaluator remains private.
 
-An explicit `ngfield.GalerkinProblem` remains usable for bases outside the modern
-`Space` route:
+## Validation and development
 
-```python
-problem = NeuralSemigroupProblem.from_galerkin(
-    galerkin_problem,
-    basis=basis,
-    radius=1.5,
-)
-```
-
-This adapter still does not expose or ask the user to construct the reference field.
-
-## Public contract
-
-The stable surface is intentionally small:
-
-| Object or operation | Meaning |
-| --- | --- |
-| `NeuralSemigroupProblem(...)` | Basis, weak form and reduced training domain. |
-| `problem.train(...)` | Choose `volume`, `radius`, or `mixed`, build targets and fit the raw field. |
-| `NeuralSemigroup` | Trained field together with its continuous-flow interface. |
-| `semigroup.field(z)` | Scaled learned autonomous field. |
-| `semigroup.velocity(z)` | Learned velocity in physical time. |
-| `semigroup.solve(z0, times)` | Reduced trajectory. |
-| `semigroup.project` / `reconstruct` | Analysis and synthesis in the fixed basis. |
-| `semigroup.save` / `problem.load` | Reproducible checkpoint round trip. |
-
-Every leading state axis is a batch axis: the neural field maps `[...,N]` to
-`[...,N]`.
-
-See the [design contract](docs/design-contract.md) for fixed choices, invariants and
-current limitations.
-
-## Working with coding agents
-
-The root [`AGENTS.md`](AGENTS.md) gives coding agents a complete operational guide to the
-method invariants, compact public API, `ngfield` boundary, experiment protocol, testing
-workflow and current non-goals. Start the agent from the repository root so it discovers
-these instructions before writing examples or changing the library.
-
-## Development
+Compare the learned field with the Galerkin field on independent states, and
+compare trajectories using matched integrator settings. Separately report
+projection, Galerkin truncation, neural field, and time integration errors.
 
 ```bash
 python -m pytest
@@ -214,12 +151,11 @@ ruff format --check .
 python -m build
 ```
 
-## Development provenance
+See [design contract](docs/design-contract.md), [agent guide](AGENTS.md),
+[example](examples/heat.py) and [changelog](CHANGELOG.md).
 
-The implementation was developed with substantial assistance from Astra, including
-code generation and review. This assistance is declared explicitly; responsibility
-for the method, validation and reported scientific results remains with the author.
+## Provenance and license
 
-## License
-
-Copyright © 2026 Carlos Andrés Murillo. Distributed under the BSD 3-Clause License.
+Development involved substantial assistance from Astra, including code generation
+and review. Responsibility for the method and scientific claims remains with the
+author. Copyright © 2026 Carlos Andrés Murillo. BSD 3-Clause License.

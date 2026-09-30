@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "torch>=2.4,<3",
-  "numerical-galerkin-field @ git+https://github.com/cmurillos/Numerical-Galerkin-Field.git@9f7f71c1d70858cc5939d782373d0029ecea6717",
+  "numerical-galerkin-field @ git+https://github.com/cmurillos/Numerical-Galerkin-Field.git@a466f1350d5cac0aad004386545f7f6ff4901e70",
 ]
 
 [project.optional-dependencies]

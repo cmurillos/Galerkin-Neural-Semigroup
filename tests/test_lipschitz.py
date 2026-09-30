@@ -1,71 +1,56 @@
 import unittest
 
 import torch
+from ngfield import state_derivatives
 
 from galerkin_neural_semigroup._lipschitz import estimate_reference_lipschitz
 
 
+class Reference:
+    dimension = 2
+
+    def __init__(self, matrix, offset=None):
+        self.matrix = matrix
+        self.offset = offset
+
+    def _states(self, states):
+        assert states.shape[-1] == 2
+
+    def __call__(self, states):
+        result = states @ self.matrix.T
+        return result if self.offset is None else result + self.offset
+
+    def state_derivatives(self, states, order):
+        return state_derivatives(self, states, order)
+
+
 class ReferenceLipschitzTests(unittest.TestCase):
-    def test_affine_field_recovers_spectral_norm_with_offset_and_time_scale(self):
+    def test_affine_offset_does_not_change_sampled_derivative_norm(self):
         matrix = torch.diag(torch.tensor([3.0, 0.4], dtype=torch.float64))
         offset = torch.tensor([12.0, -5.0], dtype=torch.float64)
-
-        def field(states):
-            return states @ matrix.T + offset
-
-        estimate, probes, step = estimate_reference_lipschitz(
-            field,
+        estimate, probes = estimate_reference_lipschitz(
+            Reference(matrix, offset),
             2,
             radius=2.0,
-            time_scale=0.25,
             batch_size=17,
             generator=torch.Generator().manual_seed(91),
             device=torch.device("cpu"),
             dtype=torch.float64,
         )
-        self.assertAlmostEqual(estimate, 0.75, places=9)
+        self.assertAlmostEqual(estimate, 3.0, places=12)
         self.assertGreaterEqual(probes, 16)
-        self.assertLess(step, 0.01)
 
-    def test_nonlinear_estimate_is_reproducible_but_not_a_certificate(self):
-        def field(states):
-            return states.square()
-
-        def estimate():
-            return estimate_reference_lipschitz(
-                field,
-                2,
-                radius=1.0,
-                time_scale=1.0,
-                batch_size=32,
-                generator=torch.Generator().manual_seed(7),
-                device=torch.device("cpu"),
-                dtype=torch.float64,
-            )
-
-        first = estimate()
-        self.assertEqual(first, estimate())
-        self.assertLess(first[0], 2.0)
-        self.assertGreater(first[0], 0.0)
-
-    def test_float32_uses_a_stable_difference_step(self):
+    def test_reproducibility_and_float32(self):
         matrix = torch.diag(torch.tensor([2.0, 0.1], dtype=torch.float32))
-
-        def field(states):
-            return states @ matrix.T
-
-        estimate, _, step = estimate_reference_lipschitz(
-            field,
-            2,
-            radius=1.0,
-            time_scale=1.0,
-            batch_size=32,
-            generator=torch.Generator().manual_seed(11),
-            device=torch.device("cpu"),
-            dtype=torch.float32,
+        args = dict(radius=1.0, batch_size=16, device=torch.device("cpu"), dtype=torch.float32)
+        first = estimate_reference_lipschitz(
+            Reference(matrix), 2, generator=torch.Generator().manual_seed(7), **args
         )
-        self.assertAlmostEqual(estimate, 2.0, places=4)
-        self.assertEqual(step, 1e-2)
+        second = estimate_reference_lipschitz(
+            Reference(matrix), 2, generator=torch.Generator().manual_seed(7), **args
+        )
+        self.assertEqual(first, second)
+        self.assertAlmostEqual(first[0], 2.0, places=5)
 
 
 if __name__ == "__main__":

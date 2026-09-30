@@ -4,6 +4,7 @@ from math import isclose, isfinite
 from pathlib import Path
 
 import torch
+from ngfield import multi_indices, state_derivatives
 
 from ._lipschitz import estimate_reference_lipschitz
 from ._network import (
@@ -11,13 +12,15 @@ from ._network import (
     LEGACY_COMPACT_SUPPORT,
     LEGACY_SUPPORT_END_RADIUS,
     LEGACY_SUPPORT_START_RADIUS,
+    OPEN_BALL_DOMAIN,
     SUPPORT_END_RADIUS,
     SUPPORT_START_RADIUS,
     UNIT_BALL_NORMALIZATION,
+    _LocalBallField,
     _SpectralMLP,
     _UnitBallField,
 )
-from ._sampling import sample_unit_ball, sampling_mode, unit_ball_targets
+from ._sampling import sample_unit_ball, unit_ball_targets
 from ._validation import (
     compute_device,
     floating_dtype,
@@ -47,24 +50,21 @@ def _generator(device, seed):
     return result
 
 
-def _field_loss(prediction, target):
-    """Return the direct squared Euclidean field-matching loss."""
-    return (prediction - target).square().sum(dim=-1).mean()
+def _field_loss(field, states, targets, order):
+    """Sample the usual integer-order H^k norm squared on the unit ball."""
+    predicted = state_derivatives(field, states, order)
+    return sum(
+        (predicted[alpha] - targets[alpha]).square().sum(dim=-1).mean()
+        for alpha in multi_indices(states.shape[-1], order)
+    )
 
 
-def _mean_loss(field, states, targets, batch_size):
+def _mean_loss(field, states, targets, batch_size, order):
     total = torch.zeros((), device=states.device, dtype=torch.float64)
-    with torch.no_grad():
-        for start in range(0, len(states), batch_size):
-            state = states[start : start + batch_size]
-            target = targets[start : start + batch_size]
-            total.add_(
-                _field_loss(
-                    field(state),
-                    target,
-                ),
-                alpha=len(state),
-            )
+    for start in range(0, len(states), batch_size):
+        state = states[start : start + batch_size]
+        target = {alpha: value[start : start + batch_size] for alpha, value in targets.items()}
+        total.add_(_field_loss(field, state, target, order).detach(), alpha=len(state))
     result = float((total / len(states)).item())
     if not isfinite(result):
         raise FloatingPointError("Evaluation produced a nonfinite loss.")
@@ -76,8 +76,8 @@ class NeuralSemigroupProblem:
 
     The normal route receives an operational ngfield basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
-    restrictions are already carried by the basis. The user selects one of three
-    fixed vectorized sampling measures. The tanh MLP, direct field loss and exact
+    restrictions are already carried by the basis. The sampling measure is uniform
+    volume on the ball. The tanh MLP, indexed Sobolev loss and exact
     spectral projection remain fixed by the method.
     """
 
@@ -88,7 +88,7 @@ class NeuralSemigroupProblem:
         weak,
         radius,
         quadrature=None,
-        time_scale=1.0,
+        sobolev_order=1,
     ):
         dimension = positive_integer(getattr(basis, "dimension", None), "basis.dimension")
         if not callable(getattr(basis, "evaluate", None)):
@@ -99,7 +99,7 @@ class NeuralSemigroupProblem:
         self.weak = weak
         self.radius = positive_real(radius, "radius")
         self.quadrature = quadrature
-        self.time_scale = positive_real(time_scale, "time_scale")
+        self.sobolev_order = positive_integer(sobolev_order, "sobolev_order", minimum=0)
         self.dimension = dimension
         self._explicit_problem = None
 
@@ -111,7 +111,7 @@ class NeuralSemigroupProblem:
         basis,
         radius,
         quadrature=None,
-        time_scale=1.0,
+        sobolev_order=1,
     ):
         """Adapt an explicit legacy/general GalerkinProblem without exposing its field."""
         from ngfield import GalerkinProblem
@@ -123,7 +123,7 @@ class NeuralSemigroupProblem:
             weak=problem.weak,
             radius=radius,
             quadrature=quadrature,
-            time_scale=time_scale,
+            sobolev_order=sobolev_order,
         )
         result._explicit_problem = problem
         return result
@@ -148,7 +148,6 @@ class NeuralSemigroupProblem:
         lipschitz="auto",
         lipschitz_factor=1.5,
         samples=10_000,
-        sampling="volume",
         batch_size=256,
         epochs=1_000,
         lr=1e-3,
@@ -157,13 +156,12 @@ class NeuralSemigroupProblem:
         dtype=None,
         verbose=False,
     ):
-        """Train the raw field on one fixed measure; taper only the deployed field."""
+        """Train the normalized field against indexed derivatives of the reference."""
         hidden = hidden_widths(hidden)
         if lipschitz != "auto":
             lipschitz = positive_real(lipschitz, "lipschitz")
         lipschitz_factor = positive_real(lipschitz_factor, "lipschitz_factor")
         samples = positive_integer(samples, "samples", minimum=2)
-        sampling = sampling_mode(sampling)
         batch_size = min(positive_integer(batch_size, "batch_size"), samples)
         epochs = positive_integer(epochs, "epochs")
         lr = positive_real(lr, "lr")
@@ -182,11 +180,10 @@ class NeuralSemigroupProblem:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
 
         if lipschitz == "auto":
-            estimate, probes, step = estimate_reference_lipschitz(
+            estimate, probes = estimate_reference_lipschitz(
                 coordinate_system,
                 self.dimension,
                 radius=self.radius,
-                time_scale=self.time_scale,
                 batch_size=batch_size,
                 generator=_generator(device, seed + 1789),
                 device=device,
@@ -194,10 +191,9 @@ class NeuralSemigroupProblem:
             )
             lipschitz = max(1e-6, lipschitz_factor * estimate)
             calibration = {
-                "mode": "empirical-finite-difference",
+                "mode": "empirical-indexed-derivatives",
                 "reference_estimate_normalized": estimate,
                 "probe_states": probes,
-                "step_normalized": step,
                 "factor": lipschitz_factor,
                 "certified_upper_bound": False,
                 "network_budget": lipschitz,
@@ -209,7 +205,6 @@ class NeuralSemigroupProblem:
         train_unit_states = sample_unit_ball(
             samples,
             self.dimension,
-            sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
@@ -217,7 +212,6 @@ class NeuralSemigroupProblem:
         validation_unit_states = sample_unit_ball(
             validation_samples,
             self.dimension,
-            sampling=sampling,
             generator=generator,
             device=device,
             dtype=dtype,
@@ -226,18 +220,18 @@ class NeuralSemigroupProblem:
             coordinate_system,
             train_unit_states,
             radius=self.radius,
-            time_scale=self.time_scale,
+            order=self.sobolev_order,
             batch_size=batch_size,
         )
         validation_targets = unit_ball_targets(
             coordinate_system,
             validation_unit_states,
             radius=self.radius,
-            time_scale=self.time_scale,
+            order=self.sobolev_order,
             batch_size=batch_size,
         )
 
-        field = _UnitBallField(
+        field = _LocalBallField(
             _SpectralMLP(
                 self.dimension,
                 hidden,
@@ -246,7 +240,7 @@ class NeuralSemigroupProblem:
                 dtype=dtype,
             ),
             self.radius,
-            compact_support=True,
+            self.sobolev_order,
         )
         optimizer = torch.optim.Adam(field.parameters(), lr=lr)
         training_losses = []
@@ -263,8 +257,10 @@ class NeuralSemigroupProblem:
             for start in range(0, samples, batch_size):
                 indices = order[start : start + batch_size]
                 loss = _field_loss(
-                    field.core(train_unit_states[indices]),
-                    train_targets[indices],
+                    field.core,
+                    train_unit_states[indices],
+                    {alpha: values[indices] for alpha, values in train_targets.items()},
+                    self.sobolev_order,
                 )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -279,6 +275,7 @@ class NeuralSemigroupProblem:
                 validation_unit_states,
                 validation_targets,
                 batch_size,
+                self.sobolev_order,
             )
             training_losses.append(epoch_loss)
             validation_losses.append(validation_loss)
@@ -307,12 +304,7 @@ class NeuralSemigroupProblem:
             train_unit_states,
             train_targets,
             batch_size,
-        )
-        supported_validation_loss = _mean_loss(
-            field.normalized,
-            validation_unit_states,
-            validation_targets,
-            batch_size,
+            self.sobolev_order,
         )
         norms = field.spectral_norms()
         history = {
@@ -323,16 +315,10 @@ class NeuralSemigroupProblem:
             "best_epoch": best_epoch + 1,
             "training_loss": final_training_loss,
             "validation_loss": best_loss,
-            "supported_validation_loss": supported_validation_loss,
             "base_lipschitz_bound": field.core.effective_lipschitz_bound(),
             "effective_lipschitz_bound": field.effective_lipschitz_bound(),
             "layer_spectral_norms": norms,
         }
-        measure = {
-            "volume": "normalized-volume-ball",
-            "radius": "uniform-radius-ball",
-            "mixed": "half-volume-half-radius-ball",
-        }[sampling]
         metadata = {
             "basis": _basis_signature(self.basis),
             "reference": {
@@ -344,21 +330,20 @@ class NeuralSemigroupProblem:
                 "orthonormality_error": coordinate_system.orthonormality_error,
             },
             "method": {
-                "measure": measure,
+                "measure": "normalized-volume-ball",
                 "activation": "tanh",
                 "spectral_projection": "exact",
-                "loss": "mean-squared-euclidean-field-error",
+                "loss": "mean-squared-indexed-sobolev-error",
+                "sobolev_order": self.sobolev_order,
                 "loss_coordinates": UNIT_BALL_NORMALIZATION,
                 "coordinate_normalization": UNIT_BALL_NORMALIZATION,
-                "compact_support": COMPACT_SUPPORT,
-                "support_start_radius_fraction": SUPPORT_START_RADIUS,
-                "support_end_radius_fraction": SUPPORT_END_RADIUS,
+                "domain": OPEN_BALL_DOMAIN,
                 "autonomous": True,
             },
             "training": {
                 "samples": samples,
                 "validation_samples": validation_samples,
-                "sampling": sampling,
+                "sampling": "volume",
                 "batch_size": batch_size,
                 "epochs": epochs,
                 "lr": lr,
@@ -370,13 +355,12 @@ class NeuralSemigroupProblem:
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
-            "reference_package": "numerical-galerkin-field@9f7f71c1",
+            "reference_package": "numerical-galerkin-field@a466f135",
         }
         return NeuralSemigroup(
             field=field,
             coordinate_system=coordinate_system,
             radius=self.radius,
-            time_scale=self.time_scale,
             history=history,
             metrics=metrics,
             metadata=metadata,
@@ -387,15 +371,20 @@ class NeuralSemigroupProblem:
         device = compute_device(device)
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
         schema_version = checkpoint.get("schema_version")
-        if schema_version not in (1, 2, 3, 4):
+        if schema_version not in (1, 2, 3, 4, 5):
             raise ValueError("Unsupported Galerkin Neural Semigroup checkpoint schema.")
         configuration = checkpoint.get("field_configuration", {})
         if configuration.get("dimension") != self.dimension:
             raise ValueError("The checkpoint and problem basis dimensions differ.")
         if not isclose(float(checkpoint.get("radius")), self.radius, rel_tol=0, abs_tol=0):
             raise ValueError("The checkpoint and problem use different training radii.")
-        if not isclose(float(checkpoint.get("time_scale")), self.time_scale, rel_tol=0, abs_tol=0):
-            raise ValueError("The checkpoint and problem use different time scales.")
+        if schema_version == 5:
+            if "time_scale" in checkpoint:
+                raise ValueError("A local-field checkpoint cannot carry a time scale.")
+            if configuration.get("sobolev_order") != self.sobolev_order:
+                raise ValueError("The checkpoint and problem use different Sobolev orders.")
+            if configuration.get("domain") != OPEN_BALL_DOMAIN:
+                raise ValueError("The checkpoint records an unsupported field domain.")
         if checkpoint.get("metadata", {}).get("basis") != _basis_signature(self.basis):
             raise ValueError("The checkpoint basis signature does not match this problem.")
         if dtype is None:
@@ -412,33 +401,37 @@ class NeuralSemigroupProblem:
             device=device,
             dtype=dtype,
         )
-        if schema_version in (2, 3, 4):
+        if schema_version in (2, 3, 4, 5):
             if configuration.get("coordinate_normalization") != UNIT_BALL_NORMALIZATION:
                 raise ValueError("The checkpoint records an unsupported coordinate normalization.")
-            if schema_version == 3 and (
-                configuration.get("compact_support") != LEGACY_COMPACT_SUPPORT
-                or configuration.get("support_inner_radius_fraction") != LEGACY_SUPPORT_START_RADIUS
-            ):
-                raise ValueError("The checkpoint records an unsupported compact support.")
-            if schema_version == 4 and (
-                configuration.get("compact_support") != COMPACT_SUPPORT
-                or configuration.get("support_start_radius_fraction") != SUPPORT_START_RADIUS
-                or configuration.get("support_end_radius_fraction") != SUPPORT_END_RADIUS
-            ):
-                raise ValueError("The checkpoint records an unsupported compact support.")
-            if schema_version == 2 and "compact_support" in configuration:
-                raise ValueError("The checkpoint compact support does not match its schema.")
-            field = _UnitBallField(
-                core,
-                self.radius,
-                compact_support=schema_version in (3, 4),
-                support_start_radius=(
-                    LEGACY_SUPPORT_START_RADIUS if schema_version == 3 else SUPPORT_START_RADIUS
-                ),
-                support_end_radius=(
-                    LEGACY_SUPPORT_END_RADIUS if schema_version == 3 else SUPPORT_END_RADIUS
-                ),
-            )
+            if schema_version == 5:
+                field = _LocalBallField(core, self.radius, self.sobolev_order)
+            else:
+                if schema_version == 3 and (
+                    configuration.get("compact_support") != LEGACY_COMPACT_SUPPORT
+                    or configuration.get("support_inner_radius_fraction")
+                    != LEGACY_SUPPORT_START_RADIUS
+                ):
+                    raise ValueError("The checkpoint records an unsupported compact support.")
+                if schema_version == 4 and (
+                    configuration.get("compact_support") != COMPACT_SUPPORT
+                    or configuration.get("support_start_radius_fraction") != SUPPORT_START_RADIUS
+                    or configuration.get("support_end_radius_fraction") != SUPPORT_END_RADIUS
+                ):
+                    raise ValueError("The checkpoint records an unsupported compact support.")
+                if schema_version == 2 and "compact_support" in configuration:
+                    raise ValueError("The checkpoint compact support does not match its schema.")
+                field = _UnitBallField(
+                    core,
+                    self.radius,
+                    compact_support=schema_version in (3, 4),
+                    support_start_radius=(
+                        LEGACY_SUPPORT_START_RADIUS if schema_version == 3 else SUPPORT_START_RADIUS
+                    ),
+                    support_end_radius=(
+                        LEGACY_SUPPORT_END_RADIUS if schema_version == 3 else SUPPORT_END_RADIUS
+                    ),
+                )
         else:
             field = core
         field.load_state_dict(checkpoint["field_state"])
@@ -447,7 +440,7 @@ class NeuralSemigroupProblem:
             field=field,
             coordinate_system=coordinate_system,
             radius=self.radius,
-            time_scale=self.time_scale,
+            time_scale=checkpoint.get("time_scale", 1.0),
             history=checkpoint.get("history", {}),
             metrics=checkpoint.get("metrics", {}),
             metadata=checkpoint.get("metadata", {}),
@@ -457,5 +450,5 @@ class NeuralSemigroupProblem:
         return (
             "NeuralSemigroupProblem("
             f"dimension={self.dimension}, radius={self.radius:g}, "
-            f"time_scale={self.time_scale:g})"
+            f"sobolev_order={self.sobolev_order})"
         )

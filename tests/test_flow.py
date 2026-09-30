@@ -1,8 +1,9 @@
 import unittest
 
 import torch
+from ngfield import DomainExitError, integrate_field
 
-from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
+from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP
 from galerkin_neural_semigroup.semigroup import NeuralSemigroup
 
 from ._fixtures import heat_problem
@@ -10,77 +11,78 @@ from ._fixtures import heat_problem
 
 class FlowTests(unittest.TestCase):
     def setUp(self):
-        self.problem = heat_problem(time_scale=2.0)
+        self.problem = heat_problem(radius=3.0, sobolev_order=1)
         coordinate_system = self.problem._build_coordinate_system(
-            device=torch.device("cpu"),
-            dtype=torch.float64,
+            device=torch.device("cpu"), dtype=torch.float64
         )
-        core = _SpectralMLP(
-            2,
-            (),
-            1.0,
-            device=torch.device("cpu"),
-            dtype=torch.float64,
-        )
+        core = _SpectralMLP(2, (), 1.0, device=torch.device("cpu"), dtype=torch.float64)
         with torch.no_grad():
             core.weights[0].copy_(-0.5 * torch.eye(2, dtype=torch.float64))
             core.biases[0].zero_()
-        field = _UnitBallField(core, radius=3.0)
+        field = _LocalBallField(core, radius=3.0, sobolev_order=1)
         self.semigroup = NeuralSemigroup(
-            field=field,
-            coordinate_system=coordinate_system,
-            radius=3.0,
-            time_scale=2.0,
+            field=field, coordinate_system=coordinate_system, radius=3.0
         )
 
-    def test_time_scale_and_adaptive_flow(self):
+    def test_physical_time_forward_backward_and_defect(self):
         state = torch.tensor([1.0, -2.0], dtype=torch.float64)
         result = self.semigroup(state, 0.8, tolerance=1e-11)
-        expected = state * torch.exp(torch.tensor(-0.2, dtype=torch.float64))
-        torch.testing.assert_close(result, expected, atol=2e-10, rtol=2e-10)
-        self.assertFalse(result.requires_grad)
+        expected = state * torch.exp(torch.tensor(-0.4, dtype=torch.float64))
+        torch.testing.assert_close(result, expected, atol=2e-9, rtol=2e-9)
         recovered = self.semigroup(result, -0.8, tolerance=1e-11)
-        torch.testing.assert_close(recovered, state, atol=4e-10, rtol=4e-10)
-        torch.testing.assert_close(self.semigroup.velocity(state), -0.25 * state)
+        torch.testing.assert_close(recovered, state, atol=5e-9, rtol=5e-9)
+        torch.testing.assert_close(self.semigroup.velocity(state), -0.5 * state)
+        self.assertLess(
+            torch.linalg.vector_norm(
+                self.semigroup.defect(state, 0.2, 0.3, tolerance=1e-11)
+            ).item(),
+            1e-9,
+        )
 
-    def test_composition_defect_is_integrator_scale(self):
-        state = torch.tensor([0.7, -0.4], dtype=torch.float64)
-        defect = self.semigroup.defect(state, 0.2, 0.3, tolerance=1e-11)
-        self.assertLess(torch.linalg.vector_norm(defect).item(), 1e-10)
-
-    def test_fixed_rk4_and_physical_reconstruction(self):
+    def test_both_fields_use_the_ngf_integrator_with_identical_controls(self):
         state = torch.tensor([1.0, 0.5], dtype=torch.float64)
         times = torch.linspace(0, 0.2, 3, dtype=torch.float64)
-        states = self.semigroup.solve(state, times, step=1e-3)
-        self.assertEqual(states.shape, (3, 2))
+        learned = self.semigroup.solve(state, times, step=0.02, order=3)
+        direct_learned = integrate_field(
+            self.semigroup.field, state, times, step=0.02, order=3, radius=3.0
+        )
+        torch.testing.assert_close(learned, direct_learned)
+        galerkin = self.problem._build_coordinate_system(
+            device=torch.device("cpu"), dtype=torch.float64
+        )
+        torch.testing.assert_close(
+            galerkin.solve(state, times, step=0.02, order=3, radius=3.0),
+            integrate_field(galerkin, state, times, step=0.02, order=3, radius=3.0),
+        )
         points = torch.linspace(0, 1, 5, dtype=torch.float64).reshape(-1, 1)
-        physical = self.semigroup.reconstruct(states, points)
-        self.assertEqual(physical.shape, (3, 5, 1))
+        self.assertEqual(self.semigroup.reconstruct(learned, points).shape, (3, 5, 1))
 
-    def test_arbitrary_leading_batch_axes_are_preserved(self):
-        states = torch.ones(2, 3, 2, dtype=torch.float64)
+    def test_batch_axes_and_initial_state_gradient(self):
+        states = torch.ones(2, 3, 2, dtype=torch.float64) * 0.3
         times = torch.tensor([0.0, 0.1], dtype=torch.float64)
-        trajectory = self.semigroup.solve(states, times, tolerance=1e-10)
-        self.assertEqual(trajectory.shape, (2, 2, 3, 2))
-
-    def test_flow_remains_differentiable_with_respect_to_initial_state(self):
+        self.assertEqual(self.semigroup.solve(states, times).shape, (2, 2, 3, 2))
         state = torch.tensor([0.6, -0.2], dtype=torch.float64, requires_grad=True)
-        result = self.semigroup(state, 0.1, tolerance=1e-10)
-        result.sum().backward()
+        self.semigroup(state, 0.1, tolerance=1e-10).sum().backward()
         self.assertTrue(torch.isfinite(state.grad).all())
 
-    def test_fixed_solver_still_rejects_nonfinite_results(self):
+    def test_boundary_is_undefined_and_no_exterior_evaluation(self):
+        outside = torch.tensor([3.0, 0.0], dtype=torch.float64)
+        with self.assertRaisesRegex(ValueError, "open ball"):
+            self.semigroup.field(outside)
+        with self.assertRaisesRegex(ValueError, "open ball"):
+            self.semigroup(outside, 0.0)
         core = self.semigroup.field.core
         core.train()
         with torch.no_grad():
-            core.weights[0].copy_(torch.eye(2, dtype=torch.float64))
-            core.biases[0].zero_()
+            core.weights[0].zero_()
+            core.biases[0].copy_(torch.tensor([1.0, 0.0], dtype=torch.float64))
         self.semigroup.field.eval()
-        state = torch.full((2,), torch.finfo(torch.float64).max / 2, dtype=torch.float64)
-        times = torch.tensor([0.0, 1.0], dtype=torch.float64)
-
-        with self.assertRaisesRegex(FloatingPointError, "RK4"):
-            self.semigroup.solve(state, times, step=1.0)
+        with self.assertRaises(DomainExitError):
+            self.semigroup.solve(
+                torch.tensor([2.9, 0.0], dtype=torch.float64),
+                torch.tensor([0.0, 0.2], dtype=torch.float64),
+                step=0.05,
+            )
 
 
 if __name__ == "__main__":

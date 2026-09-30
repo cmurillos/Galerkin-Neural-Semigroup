@@ -1,249 +1,149 @@
 # Design contract
 
-This document records the initial public contract of Galerkin Neural Semigroup. It
-separates choices fixed by the method from information that a user must supply.
+This document states the implemented method. It distinguishes the PDE state
+space from the Sobolev regularity of the **reduced vector field as a function of
+its coordinates**. The earlier sampling/taper/time-scale variants survive only
+when loading historical checkpoints.
 
-## D-001 — Public problem definition
+## D-001 — Galerkin reference and physical state
 
-The normal constructor is
-
-```python
-NeuralSemigroupProblem(
-    basis=basis,
-    weak=weak,
-    radius=R0,
-    quadrature=None,
-    time_scale=1.0,
-)
-```
-
-The operational basis is fixed, real and numerically L2-orthonormal. In the modern
-Numerical Galerkin Field workflow it carries its `Space`, geometry, physical component
-shape and homogeneous restrictions. These data are not repeated here. `basis.dimension`
-is the reduced dimension `N`.
-
-`weak` is a complete autonomous weak form in the Numerical Galerkin Field expression
-language. `radius` is the positive radius of the coordinate ball used for learning.
-`quadrature` retains the exact semantics of the reference package: `None` is automatic,
-an integer fixes an order and a real in `(0,1)` requests adaptive preparation.
-
-The compatibility constructor `from_galerkin(problem, ...)` is reserved for explicit
-`GalerkinProblem` workflows. Neither route returns the numerical reference field.
-
-## D-002 — Three fixed learning measures and direct objective
-
-The physical training domain is
+An operational real L²-orthonormal basis `(φ₁,…,φ_N)` is fixed by NGF. The PDE
+is posed through its autonomous weak form in the underlying L²-based physical
+setting. With `Φ(z)=Σ_i z_i φ_i`, NGF evaluates the reduced field
 
 ```text
-B_N(R0) = {z in R^N : ||z||_2 < R0}.
+G: ℝ^N → ℝ^N,       G_i(z)=a(Φ(z);φ_i).
 ```
 
-The network sees normalized coordinates `x = z/R0` in `B_N(1)`. For a standard
-Gaussian direction `xi` and `s ~ Uniform(0,1)`, the implementation offers three
-fixed, non-adaptive measures:
+The precise domain and differentiability of `G` depend on the weak problem and
+basis. The L² isometry holds **on the finite-dimensional span** of this basis:
+`||Φ(z)||_{L²}=||z||₂`. It does not identify the full L² space with `ℝ^N`.
+
+The normal constructor takes `basis`, `weak`, `radius=R>0`, optional
+`quadrature`, and integer `sobolev_order=k≥0`. The compatibility constructor
+`from_galerkin` accepts an explicit `GalerkinProblem`. The reference remains
+private in either route.
+
+## D-002 — Normalized open ball and exact scaling
+
+Let `B_N(R)={z∈ℝ^N:||z||₂<R}` and `x=z/R∈B_N(1)`. Define
 
 ```text
-sampling="volume": x = s^(1/N) * xi / ||xi||_2,
-sampling="radius": x = s       * xi / ||xi||_2,
-sampling="mixed":  choose "volume" or "radius" independently with probability 1/2,
-physical state:    z = R0 * x.
+g_R(x)=G(Rx)/R,       Fθ(z)=R fθ(z/R),       z∈B_N(R).
+∂_x^α g_R(x)=R^(|α|-1) ∂_z^α G(Rx).
 ```
 
-The first is normalized Lebesgue volume on the ball. The second is the product of the
-uniform radial measure on `(0,R0)` and uniform angular measure on the unit sphere.
-The third is their equal-probability mixture, with a new Bernoulli choice for every
-sample. It is not uniform volume or an adaptive sampling law.
-Directions, radii, normalized states and physical target states are generated
-vectorially. Training and validation states are drawn once from independent samples of
-the same selected measure. Epochs shuffle the fixed training tensor; they neither
-resample it nor change its distribution.
+This is an exact change of coordinates, with **unchanged physical time**.
+Changing `R` generally changes `g_R` and calls for new training. Additional
+radius transfer is justified only for a separately established symmetry of a
+particular problem. There is no arbitrary time normalization parameter.
 
-For the normalized target
+The network and its physical field are defined only in the open ball. Direct
+field evaluation at or beyond its boundary raises; no taper or projected
+exterior values are fitted. Some trajectories leave this ball. In that case a
+local numerical solve reports `DomainExitError` instead of returning a value
+outside the model's domain. No invariance of the ball is asserted.
+
+## D-003 — Indexed H^k objective and sample measure
+
+NGF lists all multi-indices `α∈ℕ₀^N` with `|α|≤k`, **once each**, and computes
+`∂_z^αG` with state-coordinate automatic differentiation. The continuous target
+quantity is the standard unweighted integer Sobolev norm:
 
 ```text
-G_hat(x) = (tau/R0) * G(R0*x),
+||fθ-g_R||²_{H^k(B_N(1))}
+= ∫_{B_N(1)} Σ_{|α|≤k} ||∂_x^α fθ(x)-∂_x^α g_R(x)||₂² dx.
 ```
 
-the sole empirical objective is the batch mean of the squared Euclidean field
-difference:
+For `B` independent fixed samples from uniform volume on the unit ball,
+training minimizes
 
 ```text
-L_B(theta) = ||F_hat_theta(X) - G_hat(X)||_F^2 / B.
+L_B(θ)=(1/B) Σ_{j=1}^B Σ_{|α|≤k}
+         ||∂_x^α fθ(x_j)-R^(|α|-1)∂_z^αG(Rx_j)||₂².
 ```
 
-It sums rather than averages over the coordinate dimension. Galerkin targets are
-evaluated in vectorized batches, detached from autograd and cached. There is no relative,
-angular, derivative, Jacobian or adaptive-refinement term.
+The sums commute. The empirical average estimates the integral divided by
+`|B_N(1)|`; this constant does not change the minimizer. There are no
+factorials, dimension-dependent normalization of coordinate components,
+extra loss terms, or trajectory supervision. For `k=0` the objective reduces
+to field matching. `H^k` measures smoothness in finite-dimensional state
+coordinates; it does not promote the physical PDE state to a spatial H^k space.
 
-## D-003 — Fixed neural architecture
+Sampling uses `x=s^(1/N)ξ/||ξ||₂` with `ξ` standard Gaussian and
+`s∼Uniform(0,1)`. Train and validation samples are drawn once and held fixed;
+the latter is independent. Targets are prepared in batches, detached **after**
+differentiation, cached and checked for finiteness. Gradients through the neural
+field derivatives remain available for Adam.
 
-The normalized neural field is autonomous and has signature
+A target `H^k` formulation requires `G` and `fθ` to possess the corresponding
+weak derivatives on the ball and square-integrability of their differences.
+Finite sampled derivatives do not by themselves prove those analytic hypotheses.
+For higher `k`, the chosen `tanh` network is smooth, but weak-form evaluation
+and numerical differentiation must still be suitable for the problem.
+
+## D-004 — Network and empirical spectral budget
+
+`fθ:B_N(1)→ℝ^N` is an autonomous affine `tanh` MLP. The exact spectral
+projection applies `W↦W/max(1,||W||₂/γ)` to each affine weight. With `d` layers
+and requested budget `L`, `γ=L^(1/d)`; the product of effective layer norms
+bounds the core's Lipschitz quotient. The physical coordinate scaling preserves
+that quotient within the ball. In eval mode weights are cached and detached
+from parameters while derivatives with respect to input states remain available.
+
+A manual positive `lipschitz` sets `L`. By default GNS samples the indexed first
+state derivatives of `g_R`, assembles their derivative matrices, and uses the
+largest sampled operator norm times `lipschitz_factor=1.5`, floored at `1e-6`.
+Finite probes and this margin cannot certify a global bound on general `G`.
+This budget procedure is an implementation heuristic, not a condition or
+parameter in the continuous mathematical objective.
+
+## D-005 — Integration and domain
+
+NGF owns `integrate_field`. The Galerkin and neural solves call this single
+implementation. Set `J₁[X]=X`, `J_{r+1}[X]=DJ_r[X] X`; its degree-`p`
+Taylor step is
 
 ```text
-F_hat: [...,N] -> [...,N].
+z_next=z+Σ_{r=1}^p h^r J_r[X](z)/r!.
 ```
 
-It is an affine MLP with componentwise `tanh` between affine layers and no activation
-after the output layer. Time is never an input. `hidden=()` selects one affine layer and
-is the exact linear test architecture.
+`order=p≥1` is independent of `k`. A positive `step` fixes a maximum internal
+step; omitting it selects adaptive stepping with an estimate from the next
+Taylor term. `tolerance` controls the adaptive rule and cannot be combined
+with `step`. The same `times`, `order`, and time-step controls must be used for
+matched Galerkin/neural comparisons. The `radius=R` check can also be passed
+to `G.solve` to restrict both comparisons to the same domain. The algorithm
+evaluates the field only at accepted interior states; a candidate outside is
+rejected without evaluating the field there.
 
-Every raw weight `W_k` is replaced during evaluation by
+The adaptive estimate does not certify global accuracy. Taylor differentiation
+can be expensive at high order and explicit time stepping can be problematic
+for stiff fields. The exact local flow has identity and composition where the
+solutions exist; `defect` measures only numerical composition error.
 
-```text
-Wbar_k = W_k / max(1, ||W_k||_2 / gamma).
-```
+## D-006 — Training and persistence
 
-If there are `d` affine layers and the user requests global budget `Lmax`, the package
-sets `gamma = Lmax^(1/d)`. The field exposed in physical reduced coordinates is
+Adam, uniform volume, fixed validation, exact spectral projection and cached
+reference targets are fixed choices. Training exposes architecture widths,
+manual or empirical Lipschitz budget, dataset size, minibatch size, epochs,
+learning rate, seed, device and dtype. The best independent validation epoch
+is restored. Metadata records `R`, `k`, normalization, training settings,
+quadrature details, calibration method and exact NGF source revision.
 
-```text
-F_base(z) = R0 * F_hat(z/R0).
-```
+Schema-5 checkpoints record the open-ball domain and `k` with model weights.
+Loading checks reduced dimension, basis signature, radius, domain and Sobolev
+order. The basis signature is a compatibility guard, not a content hash.
+Older schemas 1–4 are read using their own field normalization, time scaling
+and historical support rules, without changing their meaning. New training
+does not generate those schemas.
 
-The input and output factors cancel in its Lipschitz quotient, so
-`Lip(F_base) = Lip(F_hat) <= Lmax` independently of depth. The deployed field now
-also receives the fixed compact-support taper of D-009, whose global Lipschitz
-bound can exceed the requested base-network budget. Spectral norms are computed by
-`torch.linalg.matrix_norm(..., ord=2)`; a finite power-iteration estimate is not used as
-a certificate.
+## D-007 — Scope of a comparison
 
-During optimization the projection remains in the differentiable forward map. Once
-the module enters evaluation mode, the projected weights and fixed biases are cached
-and detached from the parameters; ODE integration therefore neither recomputes matrix
-norms at every stage nor builds a parameter graph for ordinary states. The input is not
-detached: state Jacobians remain available whenever the input explicitly requires a
-gradient. Calling `semigroup.field.train()` invalidates the cache and restores parameter
-differentiation when it is explicitly required.
-
-## D-004 — Time scaling
-
-With `time_scale=tau`, the normalized targets approximate
-`(tau/R0) * G(R0*x)`. After the inverse coordinate transform, the public field
-approximates `tau * G(z)` and evolves in scaled time `s=t/tau`. Public `solve` accepts
-physical times and performs this conversion internally. Thus `semigroup.field(z)` is the
-scaled field in the original reduced coordinates and
-`semigroup.velocity(z) = semigroup.field(z)/tau` is the learned physical-time velocity.
-
-## D-005 — Training interface
-
-The public training call receives only choices not fixed by the method:
-
-```python
-problem.train(
-    hidden=...,
-    lipschitz="auto",  # or a positive manually specified spectral budget
-    lipschitz_factor=1.5,
-    samples=...,
-    sampling="volume",  # or "radius" or "mixed"
-    batch_size=...,
-    epochs=...,
-    lr=...,
-    seed=...,
-)
-```
-
-Adam, the direct field loss and cached targets are fixed. `sampling` selects one of the
-three measures in D-002 and does not change during training. Device selection defaults to
-CUDA when available and otherwise CPU. Computation uses float64 by default; `device`
-and `dtype` are explicit advanced overrides because they affect reproducibility.
-The optional calibration of the base network budget is specified in D-010;
-it does not add a training objective or a certificate of the reference field.
-
-The returned weights are those with minimum independent validation loss. Training and
-validation losses are values of the normalized direct objective in D-002. All epochs are
-retained in `semigroup.history`; final metrics include the layer spectral norms and their
-product.
-
-## D-006 — Flow and numerical integration
-
-`NeuralSemigroup` represents the exact continuous flow mathematically, while `solve`
-provides a numerical realization. Omitting `step` uses explicit Dormand--Prince 5(4);
-providing a positive `step` uses fixed-step RK4. The two controls cannot be combined.
-
-`defect(z,s,t)` evaluates the numerical quantity
-
-```text
-Psi_t(Psi_s(z)) - Psi_(s+t)(z).
-```
-
-It diagnoses the integrator and floating-point arithmetic, not a learned semigroup-loss
-term.
-
-## D-007 — Persistence and provenance
-
-Version-4 checkpoints contain neural parameters, architecture, the unit-ball
-normalization marker, `R0`, time scale, optimization history, basis signature, precision,
-device, support start/end radii, empirical calibration metadata and the pinned
-reference-package revision. They do not serialize the weak-form
-evaluator or the private numerical field. Loading therefore occurs through the same
-`NeuralSemigroupProblem` and rejects incompatible dimensions, signatures, radii or time
-scales. Version-1 and version-2 checkpoints remain loadable with their original
-unnormalized and unmasked field semantics; version-3 retains its former taper
-on radii 0.9R0 to R0. None is silently reinterpreted.
-
-The current basis signature is deliberately conservative: dimension, physical value
-shape, family and component allocation when available. The user remains responsible for
-supplying the same ordered operational basis; a stronger content hash is future work.
-
-## D-008 — Scope
-
-- Training controls the raw field only through a finite sample from the selected measure.
-  The raw neural field matches the deployed field throughout the training ball;
-  no agreement with Galerkin is promised in the exterior taper. The continuous
-  learned flow can leave the training ball, but cannot cross the stationary
-  support boundary at twice its radius.
-- A small empirical loss is not a certified uniform error.
-- Exact spectral projection guarantees global well-posedness of the learned ODE but does
-  not establish convergence to the original infinite-dimensional evolution.
-- Explicit integration may be expensive for stiff reduced dynamics.
-- The fixed MLP is the method implemented here. Alternative neural architectures are not
-  part of the initial public API.
-
-## D-009 — Compact support after training
-
-Newly trained models use normalized coordinates `x=z/R0`, `r=||x||_2` and
-the nonexpansive radial projection `P(x)=x/max(1,r)`. The raw field is fitted
-to the unmodified Galerkin target throughout the sampled ball. After training:
-
-```text
-F_supported(z) = chi(r) * R0 * F_hat(P(x)),
-chi(r) = 1                         for r <= 1,
-       = 1 - 3q^2 + 2q^3           for 1 < r < 2, q=r-1,
-       = 0                         for r >= 2.
-```
-
-The same multiplier applies to `field`, physical-time `velocity`, and the integrated
-flow. For `1<r<2` the core is evaluated at the projected boundary point;
-beyond `2` it is not evaluated. The resulting field is continuous and globally
-Lipschitz, including at both transition radii. No additional training
-objective or learned parameter is added. The output equals the raw field
-throughout the training ball and is generally biased relative to Galerkin
-outside it. The historical `supported_validation_loss` metric equals the
-deployed field's validation loss inside the sampled ball.
-
-If `L_base` bounds the raw field's Lipschitz quotient and `a=||F_hat(0)||_2`, a valid
-global bound for the deployed field is `L_base + 1.5*(a + L_base)`;
-the radius normalization cancels. This **can exceed** the user-specified
-base budget; moving the transition outward does not eliminate its contribution.
-The continuous flow is globally unique. Numerical trajectories can have
-small integration error; the algorithm does not silently clip states.
-Only states starting at or outside `2R0` are stationary.
-
-## D-010 — Empirical automatic spectral budget
-
-For normalized reference `G_hat(x)=(tau/R0)G(R0*x)`, the ideal base-field
-Lipschitz constant on `B_N(1)` is the supremum of its two-point quotients.
-When `lipschitz="auto"` (the default), use independent fixed anchors sampled
-from the mixed ball and the origin; evaluate symmetric coordinate difference
-quotients through the private Galerkin field, assemble an approximate Jacobian
-and take the maximum operator 2-norm across anchors. All pairs remain inside
-the unit ball and use batched reference evaluations. Multiply the estimate
-by `lipschitz_factor` (default 1.5) and use at least 1e-6 as the positive base
-network spectral budget. Record the estimate, margin, probe count, finite
-difference step, selected budget and `certified_upper_bound=False`.
-
-Finite probes and finite difference steps do not provide a global upper
-bound for a general nonlinear reference; the margin is heuristic. A manually
-supplied positive number bypasses reference calibration. For affine
-references the quotient equals the operator norm of the linear part;
-the same estimator recovers it up to floating-point error.
+Separate physical projection/reconstruction error, Galerkin truncation error,
+field approximation error, temporal integration error and PDE-reference error.
+Use independent field samples and matched integration settings on the interval
+where both trajectories exist. A small empirical H^k loss alone gives no
+uniform field certificate or trajectory bound. Even a good Galerkin-field
+surrogate does not establish convergence of the Galerkin approximation to the
+underlying PDE.

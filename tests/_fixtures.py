@@ -4,7 +4,7 @@ from ngfield import SimplicialDomain, Space, ZeroTrace, grad, inner
 from galerkin_neural_semigroup import NeuralSemigroupProblem
 
 
-def heat_problem(*, dimension=2, radius=1.0, time_scale=1.0):
+def heat_problem(*, dimension=2, radius=1.0, sobolev_order=1):
     vertices = np.linspace(0, 1, 9)[:, None]
     simplices = np.column_stack((np.arange(8), np.arange(1, 9)))
     geometry = SimplicialDomain(vertices, simplices)
@@ -22,5 +22,5 @@ def heat_problem(*, dimension=2, radius=1.0, time_scale=1.0):
         basis=basis,
         weak=weak,
         radius=radius,
-        time_scale=time_scale,
+        sobolev_order=sobolev_order,
     )

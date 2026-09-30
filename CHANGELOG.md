@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Train the normalized reduced field with the unweighted, indexed H^k loss;
+  source Galerkin state derivatives from NGF and cache scaled targets.
+- Use fixed normalized-volume sampling and an open-ball local field for new
+  models. Remove the time-scale, exterior taper and radial training modes from
+  new training; older checkpoint field semantics remain loadable.
+- Call the NGF Taylor-jet integrator for both Galerkin and neural fields, with
+  matching order and time-step controls. Store new models in checkpoint schema 5.
+- Pin the NGF source commit containing indexed derivatives and the shared solver.
+
+### Earlier unreleased changes retained for historical context
+
 - Preserve the raw learned field through the full training radius R; taper
   from R to 2R, projecting network inputs onto the training ball beyond R.
   The field becomes zero from 2R onward. The deployed Lipschitz bound can

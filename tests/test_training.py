@@ -5,293 +5,133 @@ from pathlib import Path
 import torch
 
 from galerkin_neural_semigroup import NeuralSemigroup
-from galerkin_neural_semigroup._network import _SpectralMLP
+from galerkin_neural_semigroup._network import _SpectralMLP, _UnitBallField
 from galerkin_neural_semigroup.problem import _basis_signature, _field_loss
 
 from ._fixtures import heat_problem
 
 
+class Quadratic(torch.nn.Module):
+    dimension = 1
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float64))
+
+    def _states(self, states):
+        assert states.shape[-1] == 1
+
+    def forward(self, states):
+        return self.weight * states.square()
+
+
 class TrainingTests(unittest.TestCase):
-    def test_direct_loss_is_mean_over_states_and_sum_over_components(self):
-        prediction = torch.tensor(
-            [[1.0, 2.0], [3.0, 4.0]],
-            dtype=torch.float64,
-            requires_grad=True,
+    def test_taylor_order_is_independent_of_training_sobolev_order(self):
+        model = heat_problem(sobolev_order=0).train(
+            hidden=(), lipschitz=2.0, samples=8, batch_size=4, epochs=1, device="cpu"
         )
-        target = torch.zeros_like(prediction)
+        state = torch.zeros(2, dtype=model.dtype)
+        times = torch.tensor([0.0, 0.1], dtype=model.dtype)
+        self.assertEqual(model.solve(state, times, order=3).shape, (2, 2))
+        self.assertEqual(model.metadata["method"]["sobolev_order"], 0)
 
-        loss = _field_loss(prediction, target)
+    def test_h2_loss_sums_each_indexed_derivative_then_averages_states(self):
+        field = Quadratic()
+        states = torch.tensor([[0.25], [0.5]], dtype=torch.float64)
+        targets = {
+            (0,): torch.zeros_like(states),
+            (1,): torch.zeros_like(states),
+            (2,): torch.zeros_like(states),
+        }
+        loss = _field_loss(field, states, targets, 2)
+        expected = (states.pow(4) + 4 * states.square() + 4).mean()
+        torch.testing.assert_close(loss, expected)
         loss.backward()
+        self.assertIsNotNone(field.weight.grad)
+        self.assertGreater(field.weight.grad.item(), 0)
 
-        self.assertEqual(float(loss.item()), 15.0)
-        torch.testing.assert_close(prediction.grad, prediction.detach())
-
-    def test_linear_training_reduces_independent_field_error(self):
-        problem = heat_problem(radius=3.0)
+    def test_sobolev_training_and_schema_five_round_trip(self):
+        problem = heat_problem(radius=3.0, sobolev_order=2)
         semigroup = problem.train(
             hidden=(),
             lipschitz=2.0,
-            samples=128,
-            batch_size=32,
-            epochs=40,
+            samples=64,
+            batch_size=16,
+            epochs=12,
             lr=2e-2,
             seed=4,
             device="cpu",
         )
-        self.assertIsInstance(semigroup, NeuralSemigroup)
-        self.assertLess(
-            semigroup.metrics["training_loss"],
-            semigroup.history["training_loss"][0],
-        )
-        self.assertTrue(semigroup.metrics["validation_loss"] >= 0)
-        self.assertLessEqual(
-            semigroup.metrics["base_lipschitz_bound"],
-            2.0 * (1 + 1e-12),
-        )
-        self.assertGreaterEqual(
-            semigroup.metrics["effective_lipschitz_bound"],
-            semigroup.metrics["base_lipschitz_bound"],
-        )
-        self.assertGreaterEqual(semigroup.metrics["supported_validation_loss"], 0)
-        self.assertAlmostEqual(
-            semigroup.metrics["supported_validation_loss"],
-            semigroup.metrics["validation_loss"],
-        )
-        self.assertEqual(semigroup.metadata["training"]["target_mode"], "cached")
+        self.assertLess(semigroup.metrics["training_loss"], semigroup.history["training_loss"][0])
+        self.assertEqual(semigroup.metadata["method"]["sobolev_order"], 2)
+        self.assertEqual(semigroup.metadata["method"]["loss"], "mean-squared-indexed-sobolev-error")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
-        self.assertEqual(semigroup.metadata["method"]["measure"], "normalized-volume-ball")
         self.assertEqual(
-            semigroup.metadata["method"]["loss"],
-            "mean-squared-euclidean-field-error",
+            semigroup.metadata["reference_package"], "numerical-galerkin-field@a466f135"
         )
-        self.assertEqual(
-            semigroup.metadata["method"]["coordinate_normalization"],
-            "unit-ball",
-        )
-        self.assertEqual(semigroup.metadata["method"]["loss_coordinates"], "unit-ball")
-        self.assertEqual(semigroup.metadata["training"]["network_radius"], 1.0)
-        self.assertTrue(all(parameter.grad is None for parameter in semigroup.field.parameters()))
-        states = torch.randn(5, problem.dimension, dtype=semigroup.dtype)
-        torch.testing.assert_close(
-            semigroup.field(states),
-            problem.radius * semigroup.field.normalized(states / problem.radius),
-        )
-        self.assertEqual(
-            set(semigroup.history),
-            {"training_loss", "validation_loss"},
-        )
-        self.assertIn("quadrature_order", semigroup.metadata["reference"])
-        self.assertEqual(semigroup.metadata["method"]["activation"], "tanh")
-
-    def test_radius_sampling_trains_with_the_same_direct_loss(self):
-        semigroup = heat_problem().train(
-            hidden=(),
-            lipschitz=2.0,
-            samples=32,
-            sampling="radius",
-            batch_size=16,
-            epochs=2,
-            lr=1e-2,
-            seed=5,
-            device="cpu",
-        )
-
-        self.assertEqual(semigroup.metadata["training"]["sampling"], "radius")
-        self.assertEqual(semigroup.metadata["method"]["measure"], "uniform-radius-ball")
-        self.assertEqual(
-            semigroup.metadata["method"]["loss"],
-            "mean-squared-euclidean-field-error",
-        )
-
-    def test_mixed_sampling_and_compact_support_are_recorded(self):
-        semigroup = heat_problem().train(
-            hidden=(),
-            lipschitz=2.0,
-            samples=32,
-            sampling="mixed",
-            batch_size=16,
-            epochs=2,
-            lr=1e-2,
-            seed=5,
-            device="cpu",
-        )
-        self.assertEqual(semigroup.metadata["training"]["sampling"], "mixed")
-        self.assertEqual(semigroup.metadata["method"]["measure"], "half-volume-half-radius-ball")
-        self.assertEqual(semigroup.metadata["method"]["compact_support"], "smooth-annulus")
-        self.assertEqual(
-            semigroup.metrics["base_lipschitz_bound"],
-            semigroup.field.core.effective_lipschitz_bound(),
-        )
-        outside = torch.full((3, semigroup.dimension), 5.0, dtype=semigroup.dtype)
-        torch.testing.assert_close(semigroup.field(outside), torch.zeros_like(outside))
-        torch.testing.assert_close(semigroup.velocity(outside), torch.zeros_like(outside))
-
-    def test_checkpoint_round_trip_uses_same_problem(self):
-        problem = heat_problem()
-        semigroup = problem.train(
-            hidden=(4,),
-            lipschitz=1.5,
-            samples=32,
-            batch_size=16,
-            epochs=3,
-            lr=1e-2,
-            seed=1,
-            device="cpu",
-        )
-        states = torch.randn(5, problem.dimension, dtype=semigroup.dtype)
-        expected = semigroup.field(states)
+        self.assertLessEqual(semigroup.metrics["effective_lipschitz_bound"], 2.0 * (1 + 1e-12))
+        states = torch.tensor([[0.3, 0.2], [-0.1, 0.4]], dtype=semigroup.dtype)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.gns"
             semigroup.save(path)
             checkpoint = torch.load(path, weights_only=True)
-            self.assertEqual(checkpoint["schema_version"], 4)
-            self.assertEqual(
-                checkpoint["field_configuration"]["coordinate_normalization"],
-                "unit-ball",
-            )
+            self.assertEqual(checkpoint["schema_version"], 5)
+            self.assertNotIn("time_scale", checkpoint)
+            self.assertEqual(checkpoint["field_configuration"]["domain"], "open-ball")
             restored = problem.load(path, device="cpu")
-        torch.testing.assert_close(restored.field(states), expected)
+            torch.testing.assert_close(restored.field(states), semigroup.field(states))
+            with self.assertRaisesRegex(ValueError, "Sobolev orders"):
+                heat_problem(radius=3.0, sobolev_order=1).load(path, device="cpu")
+            with self.assertRaisesRegex(ValueError, "radii"):
+                heat_problem(radius=2.0, sobolev_order=2).load(path, device="cpu")
         self.assertEqual(dict(restored.metrics), dict(semigroup.metrics))
-        self.assertEqual(dict(restored.history), dict(semigroup.history))
 
-    def test_schema_three_retains_previous_support_boundary(self):
-        problem = heat_problem(radius=2.0)
-        coordinate_system = problem._build_coordinate_system(
-            device=torch.device("cpu"), dtype=torch.float64
-        )
-        from galerkin_neural_semigroup._network import _UnitBallField
-
-        core = _SpectralMLP(
-            problem.dimension, (), 2.0, device=torch.device("cpu"), dtype=torch.float64
-        )
-        with torch.no_grad():
-            core.weights[0].zero_()
-            core.biases[0].fill_(1.0)
-        field = _UnitBallField(
-            core,
-            problem.radius,
-            compact_support=True,
-            support_start_radius=0.9,
-            support_end_radius=1.0,
-        ).eval()
-        semigroup = NeuralSemigroup(
-            field=field,
-            coordinate_system=coordinate_system,
-            radius=problem.radius,
-            time_scale=problem.time_scale,
-            metadata={"basis": _basis_signature(problem.basis), "dtype": "float64"},
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "old_supported.gns"
-            semigroup.save(path)
-            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 3)
-            restored = problem.load(path, device="cpu")
-        interior = torch.full((problem.dimension,), 1.9, dtype=torch.float64)
-        torch.testing.assert_close(restored.field(interior), field(interior))
-        self.assertEqual(restored.field.configuration()["compact_support"], "smooth-unit-ball")
-
-    def test_automatic_lipschitz_budget_records_empirical_status(self):
-        semigroup = heat_problem(radius=1.5, time_scale=0.5).train(
-            hidden=(),
-            samples=24,
-            batch_size=12,
-            epochs=1,
-            seed=7,
-            device="cpu",
+    def test_automatic_calibration_uses_indexed_reference_derivatives(self):
+        semigroup = heat_problem(radius=1.5).train(
+            hidden=(), samples=16, batch_size=8, epochs=1, seed=7, device="cpu"
         )
         calibration = semigroup.metadata["training"]["lipschitz_calibration"]
-        self.assertEqual(calibration["mode"], "empirical-finite-difference")
+        self.assertEqual(calibration["mode"], "empirical-indexed-derivatives")
         self.assertFalse(calibration["certified_upper_bound"])
         self.assertGreater(calibration["reference_estimate_normalized"], 0)
         self.assertAlmostEqual(
-            calibration["network_budget"],
-            1.5 * calibration["reference_estimate_normalized"],
+            calibration["network_budget"], 1.5 * calibration["reference_estimate_normalized"]
         )
 
-    def test_schema_two_checkpoint_keeps_its_original_unmasked_field(self):
+    def test_legacy_schemas_one_through_four_keep_fields_and_time_factor(self):
         problem = heat_problem(radius=2.0)
-        coordinate_system = problem._build_coordinate_system(
-            device=torch.device("cpu"), dtype=torch.float64
-        )
-        from galerkin_neural_semigroup._network import _UnitBallField
-
-        core = _SpectralMLP(
-            problem.dimension, (), 2.0, device=torch.device("cpu"), dtype=torch.float64
-        )
-        with torch.no_grad():
-            core.weights[0].zero_()
-            core.biases[0].fill_(1.0)
-        field = _UnitBallField(core, problem.radius).eval()
-        semigroup = NeuralSemigroup(
-            field=field,
-            coordinate_system=coordinate_system,
-            radius=problem.radius,
-            time_scale=problem.time_scale,
-            metadata={"basis": _basis_signature(problem.basis), "dtype": "float64"},
-        )
-        outside = torch.full((problem.dimension,), 3.0, dtype=torch.float64)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "old.gns"
-            semigroup.save(path)
-            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 2)
-            restored = problem.load(path, device="cpu")
-        torch.testing.assert_close(restored.field(outside), field(outside))
-        self.assertGreater(torch.linalg.vector_norm(restored.field(outside)).item(), 0)
-
-    def test_schema_one_checkpoint_remains_loadable_without_reinterpretation(self):
-        problem = heat_problem(radius=2.0)
-        coordinate_system = problem._build_coordinate_system(
-            device=torch.device("cpu"),
-            dtype=torch.float64,
-        )
-        field = _SpectralMLP(
-            problem.dimension,
-            (),
-            2.0,
-            device=torch.device("cpu"),
-            dtype=torch.float64,
-        )
-        field.eval()
-        semigroup = NeuralSemigroup(
-            field=field,
-            coordinate_system=coordinate_system,
-            radius=problem.radius,
-            time_scale=problem.time_scale,
-            metadata={
-                "basis": _basis_signature(problem.basis),
-                "dtype": "float64",
-            },
-        )
-        states = torch.randn(4, problem.dimension, dtype=torch.float64)
-        expected = semigroup.field(states)
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "legacy.gns"
-            semigroup.save(path)
-            self.assertEqual(torch.load(path, weights_only=True)["schema_version"], 1)
-            restored = problem.load(path, device="cpu")
-
-        torch.testing.assert_close(restored.field(states), expected)
-        self.assertFalse(hasattr(restored.field, "normalized"))
-
-    def test_load_rejects_different_training_domain(self):
-        problem = heat_problem(radius=1.0)
-        semigroup = problem.train(
-            hidden=(),
-            lipschitz=2.0,
-            samples=16,
-            batch_size=8,
-            epochs=1,
-            lr=1e-2,
-            seed=0,
-            device="cpu",
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "model.gns"
-            semigroup.save(path)
-            incompatible = heat_problem(radius=2.0)
-            with self.assertRaisesRegex(ValueError, "radii"):
-                incompatible.load(path, device="cpu")
+        system = problem._build_coordinate_system(device=torch.device("cpu"), dtype=torch.float64)
+        state = torch.tensor([2.5, 0.0], dtype=torch.float64)
+        for schema in (1, 2, 3, 4):
+            with self.subTest(schema=schema):
+                core = _SpectralMLP(2, (), 2.0, device=torch.device("cpu"), dtype=torch.float64)
+                with torch.no_grad():
+                    core.weights[0].zero_()
+                    core.biases[0].fill_(1.0)
+                if schema == 1:
+                    field = core
+                else:
+                    field = _UnitBallField(
+                        core,
+                        2.0,
+                        compact_support=schema in (3, 4),
+                        support_start_radius=0.9 if schema == 3 else 1.0,
+                        support_end_radius=1.0 if schema == 3 else 2.0,
+                    )
+                model = NeuralSemigroup(
+                    field=field,
+                    coordinate_system=system,
+                    radius=2.0,
+                    time_scale=2.0,
+                    metadata={"basis": _basis_signature(problem.basis), "dtype": "float64"},
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "legacy.gns"
+                    model.save(path)
+                    self.assertEqual(torch.load(path, weights_only=True)["schema_version"], schema)
+                    restored = problem.load(path, device="cpu")
+                torch.testing.assert_close(restored.field(state), model.field(state))
+                torch.testing.assert_close(restored.velocity(state), model.field(state) / 2)
 
 
 if __name__ == "__main__":

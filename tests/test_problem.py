@@ -49,12 +49,12 @@ class ProblemContractTests(unittest.TestCase):
             NeuralSemigroupProblem(basis=valid.basis, weak=valid.weak, radius=0)
         with self.assertRaisesRegex(TypeError, "weak"):
             NeuralSemigroupProblem(basis=valid.basis, weak=None, radius=1)
-        with self.assertRaisesRegex(ValueError, "time_scale"):
+        with self.assertRaisesRegex(ValueError, "sobolev_order"):
             NeuralSemigroupProblem(
                 basis=valid.basis,
                 weak=valid.weak,
                 radius=1,
-                time_scale=-1,
+                sobolev_order=-1,
             )
         training = {
             "hidden": (),
@@ -65,10 +65,8 @@ class ProblemContractTests(unittest.TestCase):
             "lr": 1e-2,
             "device": "cpu",
         }
-        with self.assertRaisesRegex(ValueError, "sampling"):
-            valid.train(**training, sampling="adaptive")
         with self.assertRaisesRegex(TypeError, "sampling"):
-            valid.train(**training, sampling=None)
+            valid.train(**training, sampling="radius")
 
 
 if __name__ == "__main__":

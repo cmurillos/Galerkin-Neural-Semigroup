@@ -9,6 +9,7 @@ from torch.nn import functional as functional
 from ._validation import hidden_widths, positive_integer, positive_real
 
 UNIT_BALL_NORMALIZATION = "unit-ball"
+OPEN_BALL_DOMAIN = "open-ball"
 COMPACT_SUPPORT = "smooth-annulus"
 LEGACY_COMPACT_SUPPORT = "smooth-unit-ball"
 SUPPORT_START_RADIUS = 1.0
@@ -129,6 +130,73 @@ class _SpectralMLP(nn.Module):
             "hidden": list(self.hidden),
             "lipschitz": self.lipschitz_bound,
         }
+
+
+class _LocalBallField(nn.Module):
+    """Physical-time field defined only on the open reduced coordinate ball."""
+
+    def __init__(self, core, radius, sobolev_order):
+        super().__init__()
+        if not isinstance(core, _SpectralMLP):
+            raise TypeError("core must be a spectral MLP.")
+        self.core = core
+        self.radius = positive_real(radius, "radius")
+        if (
+            isinstance(sobolev_order, bool)
+            or not isinstance(sobolev_order, int)
+            or sobolev_order < 0
+        ):
+            raise ValueError("sobolev_order must be a nonnegative integer.")
+        self.sobolev_order = sobolev_order
+
+    @property
+    def dimension(self):
+        return self.core.dimension
+
+    @property
+    def device(self):
+        return self.core.device
+
+    @property
+    def dtype(self):
+        return self.core.dtype
+
+    def _states(self, states):
+        self.core._states(states)
+        if not bool(torch.isfinite(states).all()):
+            raise ValueError("states must be finite and inside the open ball.")
+        if not bool(torch.all(torch.linalg.vector_norm(states, dim=-1) < self.radius)):
+            raise ValueError("states must lie strictly inside the open ball.")
+
+    def normalized(self, states):
+        self.core._states(states)
+        if not bool(torch.isfinite(states).all()) or not bool(
+            torch.all(torch.linalg.vector_norm(states, dim=-1) < 1)
+        ):
+            raise ValueError("normalized states must lie strictly inside the open unit ball.")
+        return self.core(states)
+
+    def forward(self, states):
+        self._states(states)
+        return self.radius * self.core(states / self.radius)
+
+    def spectral_norms(self):
+        return self.core.spectral_norms()
+
+    def effective_lipschitz_bound(self):
+        return self.core.effective_lipschitz_bound()
+
+    def configuration(self):
+        return {
+            **self.core.configuration(),
+            "coordinate_normalization": UNIT_BALL_NORMALIZATION,
+            "domain": OPEN_BALL_DOMAIN,
+            "sobolev_order": self.sobolev_order,
+        }
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        self.core._clear_evaluation_cache()
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
 
 class _UnitBallField(nn.Module):

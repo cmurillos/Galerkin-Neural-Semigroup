@@ -6,9 +6,14 @@ from pathlib import Path
 from types import MappingProxyType
 
 import torch
+from ngfield import integrate_field
 
-from ._integration import solve as integrate
-from ._network import COMPACT_SUPPORT, LEGACY_COMPACT_SUPPORT, UNIT_BALL_NORMALIZATION
+from ._network import (
+    COMPACT_SUPPORT,
+    LEGACY_COMPACT_SUPPORT,
+    OPEN_BALL_DOMAIN,
+    UNIT_BALL_NORMALIZATION,
+)
 from ._validation import positive_real
 
 
@@ -28,7 +33,7 @@ class NeuralSemigroup:
         field,
         coordinate_system,
         radius,
-        time_scale,
+        time_scale=None,
         history=None,
         metrics=None,
         metadata=None,
@@ -36,7 +41,9 @@ class NeuralSemigroup:
         self.field = field.eval()
         self._coordinate_system = coordinate_system
         self.radius = float(radius)
-        self.time_scale = float(time_scale)
+        self._legacy_time_scale = (
+            1.0 if time_scale is None else positive_real(time_scale, "time_scale")
+        )
         self.history = MappingProxyType(
             {name: tuple(values) for name, values in dict(history or {}).items()}
         )
@@ -69,29 +76,36 @@ class NeuralSemigroup:
 
     def velocity(self, states):
         """Evaluate the learned velocity in physical time coordinates."""
-        return self.field(states) / self.time_scale
+        return self.field(states) / self._legacy_time_scale
 
-    def solve(self, z0, times, *, step=None, tolerance=None):
+    def solve(self, z0, times, *, step=None, tolerance=None, order=4):
         """Evolve reduced coordinates from the first requested physical time.
 
-        Omitting ``step`` uses adaptive Dormand--Prince 5(4). Providing ``step``
-        selects fixed-step RK4. ``step`` is expressed in physical time.
+        Uses the same indexed Taylor-jet integrator as Numerical Galerkin Field.
         """
         if not isinstance(z0, torch.Tensor):
             z0 = torch.as_tensor(z0, device=self.device, dtype=self.dtype)
         if not isinstance(times, torch.Tensor):
             times = torch.as_tensor(times, device=self.device, dtype=self.dtype)
-        scaled_times = times / self.time_scale
-        scaled_step = None if step is None else positive_real(step, "step") / self.time_scale
-        return integrate(
+        if self.field.configuration().get("domain") == OPEN_BALL_DOMAIN:
+            integration_times, integration_step, radius = times, step, self.radius
+        else:
+            integration_times = times / self._legacy_time_scale
+            integration_step = (
+                None if step is None else positive_real(step, "step") / self._legacy_time_scale
+            )
+            radius = None
+        return integrate_field(
             self.field,
             z0,
-            scaled_times,
-            step=scaled_step,
+            integration_times,
+            step=integration_step,
             tolerance=tolerance,
+            order=order,
+            radius=radius,
         )
 
-    def __call__(self, state, time, *, step=None, tolerance=None):
+    def __call__(self, state, time, *, step=None, tolerance=None, order=4):
         """Apply the learned flow at one physical time measured from zero."""
         if isinstance(time, bool) or not isinstance(time, Real):
             raise TypeError("time must be a finite real number.")
@@ -104,7 +118,7 @@ class NeuralSemigroup:
             self.field._states(state)
             return state.clone()
         times = torch.tensor([0.0, time], device=self.device, dtype=self.dtype)
-        return self.solve(state, times, step=step, tolerance=tolerance)[-1]
+        return self.solve(state, times, step=step, tolerance=tolerance, order=order)[-1]
 
     def project(self, source, *, quadrature=None):
         """Project a physical state using the fixed operational basis."""
@@ -130,21 +144,23 @@ class NeuralSemigroup:
         boundary=None,
         step=None,
         tolerance=None,
+        order=4,
     ):
         """Project, evolve and reconstruct a physical initial state."""
         z0 = self.project(initial_state, quadrature=projection_quadrature)
-        states = self.solve(z0, times, step=step, tolerance=tolerance)
+        states = self.solve(z0, times, step=step, tolerance=tolerance, order=order)
         return self.reconstruct(states, points, cells=cells, boundary=boundary)
 
-    def defect(self, state, first_time, second_time, *, step=None, tolerance=None):
+    def defect(self, state, first_time, second_time, *, step=None, tolerance=None, order=4):
         """Return Psi_t(Psi_s(z)) - Psi_{t+s}(z) for integrator diagnostics."""
-        after_first = self(state, first_time, step=step, tolerance=tolerance)
-        composed = self(after_first, second_time, step=step, tolerance=tolerance)
+        after_first = self(state, first_time, step=step, tolerance=tolerance, order=order)
+        composed = self(after_first, second_time, step=step, tolerance=tolerance, order=order)
         direct = self(
             state,
             float(first_time) + float(second_time),
             step=step,
             tolerance=tolerance,
+            order=order,
         )
         return composed - direct
 
@@ -153,7 +169,9 @@ class NeuralSemigroup:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         configuration = self.field.configuration()
-        if configuration.get("compact_support") == COMPACT_SUPPORT:
+        if configuration.get("domain") == OPEN_BALL_DOMAIN:
+            schema_version = 5
+        elif configuration.get("compact_support") == COMPACT_SUPPORT:
             schema_version = 4
         elif configuration.get("compact_support") == LEGACY_COMPACT_SUPPORT:
             schema_version = 3
@@ -167,16 +185,17 @@ class NeuralSemigroup:
             "field_configuration": configuration,
             "field_state": self.field.state_dict(),
             "radius": self.radius,
-            "time_scale": self.time_scale,
             "history": {name: list(values) for name, values in self.history.items()},
             "metrics": dict(self.metrics),
             "metadata": dict(self.metadata),
         }
+        if schema_version < 5:
+            checkpoint["time_scale"] = self._legacy_time_scale
         torch.save(checkpoint, target)
 
     def __repr__(self):
         return (
             "NeuralSemigroup("
             f"dimension={self.dimension}, radius={self.radius:g}, "
-            f"time_scale={self.time_scale:g}, device='{self.device}', dtype={self.dtype})"
+            f"device='{self.device}', dtype={self.dtype})"
         )
