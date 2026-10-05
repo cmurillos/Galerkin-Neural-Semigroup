@@ -55,8 +55,6 @@ class System:
         self,
         *,
         hidden,
-        lipschitz="auto",
-        lipschitz_factor=1.5,
         samples=10_000,
         batch_size=256,
         epochs=1_000,
@@ -70,8 +68,6 @@ class System:
         return Model(
             self._problem.train(
                 hidden=hidden,
-                lipschitz=lipschitz,
-                lipschitz_factor=lipschitz_factor,
                 samples=samples,
                 batch_size=batch_size,
                 epochs=epochs,
@@ -84,7 +80,7 @@ class System:
         )
 
     def load(self, path, *, device="auto", dtype=None):
-        """Load a matching schema-5 model into the function-valued workflow."""
+        """Load a matching local model (schemas 5 and 6) into the function-valued workflow."""
         return Model(self._problem.load(path, device=device, dtype=dtype))
 
 
@@ -93,7 +89,9 @@ class Model(NumericalSystem):
 
     def __init__(self, neural):
         if neural.field.configuration().get("domain") != OPEN_BALL_DOMAIN:
-            raise ValueError("The function-valued workflow requires an open-ball schema-5 model.")
+            raise ValueError(
+                "The function-valued workflow requires an open-ball schema-5 or schema-6 model."
+            )
         self._neural = neural
         # Keep the public NumericalSystem relationship while initializing the
         # compatible-flow contract without rebuilding the Galerkin field.
@@ -111,6 +109,10 @@ class Model(NumericalSystem):
     @property
     def metadata(self):
         return self._neural.metadata
+
+    def velocity_zero_extended(self, coefficients):
+        """Exterior-zero convention on coordinate tensors; not a phase velocity."""
+        return self._neural.velocity_zero_extended(coefficients)
 
     def save(self, path):
         self._neural.save(path)
@@ -200,6 +202,11 @@ class TrajectoryReport:
             for key in (
                 "reference_exit_time",
                 "learned_exit_time",
+                "comparison_exit_time",
+                "reference_exit_state",
+                "learned_exit_state",
+                "reference_last_accepted_time",
+                "learned_last_accepted_time",
                 "reference_survival",
                 "learned_survival",
                 "common_count",

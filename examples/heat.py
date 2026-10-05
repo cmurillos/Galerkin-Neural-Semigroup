@@ -24,7 +24,6 @@ def main():
     problem = NeuralSemigroupProblem(basis=basis, weak=weak, radius=1.5, sobolev_order=1)
     semigroup = problem.train(
         hidden=(64, 64),
-        lipschitz=10.0,
         samples=4096,
         batch_size=256,
         epochs=500,

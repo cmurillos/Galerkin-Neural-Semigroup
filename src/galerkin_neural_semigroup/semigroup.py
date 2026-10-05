@@ -78,6 +78,12 @@ class NeuralSemigroup:
         """Evaluate the learned velocity in physical time coordinates."""
         return self.field(states) / self._legacy_time_scale
 
+    def velocity_zero_extended(self, states):
+        """Evaluate the exterior-zero convention separately from the local ODE."""
+        if self.field.configuration().get("exterior_convention") != "zero":
+            raise ValueError("The exterior-zero convention requires a schema-6 model.")
+        return self.field.zero_extended(states)
+
     def solve(self, z0, times, *, step=None, tolerance=None, order=4):
         """Evolve reduced coordinates from the first requested physical time.
 
@@ -201,7 +207,9 @@ class NeuralSemigroup:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         configuration = self.field.configuration()
-        if configuration.get("domain") == OPEN_BALL_DOMAIN:
+        if configuration.get("weight_constraint") == "none":
+            schema_version = 6
+        elif configuration.get("domain") == OPEN_BALL_DOMAIN:
             schema_version = 5
         elif configuration.get("compact_support") == COMPACT_SUPPORT:
             schema_version = 4

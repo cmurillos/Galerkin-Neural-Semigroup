@@ -100,6 +100,8 @@ def _population(field, states, times, *, radius, order, step, tolerance):
     """Integrate batches; split only groups containing a path that exits."""
     paths = states.new_full((len(times), *states.shape), float("nan"))
     exit_times = states.new_full((len(states),), float("nan"))
+    last_times = torch.full_like(exit_times, float("nan"))
+    exit_states = torch.full_like(states, float("nan"))
 
     def fill(indices):
         try:
@@ -119,7 +121,9 @@ def _population(field, states, times, *, radius, order, step, tolerance):
                 fill(indices[middle:])
                 return
             index = int(indices[0])
-            exit_times[index] = exc.time
+            exit_times[index] = exc.exit_time
+            exit_states[index] = exc.exit_state[0]
+            last_times[index] = exc.time
             # NGF retains completed outputs in the original integration order,
             # including backward paths. Reuse them instead of solving again.
             completed = exc.completed_states
@@ -129,7 +133,7 @@ def _population(field, states, times, *, radius, order, step, tolerance):
 
     with torch.no_grad():
         fill(torch.arange(len(states), device=states.device))
-    return paths, exit_times
+    return paths, exit_times, exit_states, last_times
 
 
 def _mean(values, mask):
@@ -225,12 +229,18 @@ def evaluate_trajectories(
         raise TypeError("refine must be a boolean.")
     reference = model._coordinate_system
     common = dict(radius=model.radius, order=order, step=step, tolerance=tolerance)
-    g_paths, g_exit = _population(reference, initial_states, times, **common)
-    f_paths, f_exit = _population(model.field, initial_states, times, **common)
+    g_paths, g_exit, g_boundary, g_last = _population(reference, initial_states, times, **common)
+    f_paths, f_exit, f_boundary, f_last = _population(model.field, initial_states, times, **common)
     g_path, f_path = g_paths / model.radius, f_paths / model.radius
     g_alive = torch.isfinite(g_path).all(dim=-1)
     f_alive = torch.isfinite(f_path).all(dim=-1)
     both = g_alive & f_alive
+    # The first contact in integration order, in either time direction.
+    exits = torch.stack((g_exit, f_exit))
+    forward = bool(times[-1] > times[0])
+    common_exit = torch.nan_to_num(exits, nan=float("inf") if forward else -float("inf"))
+    common_exit = common_exit.min(dim=0).values if forward else common_exit.max(dim=0).values
+    common_exit = common_exit.masked_fill(torch.isnan(exits).all(dim=0), float("nan"))
     error = torch.linalg.vector_norm(f_path - g_path, dim=-1)
     mean_error = _mean(error, both)
     variance = _mean((error - mean_error[:, None]).square(), both)
@@ -264,23 +274,28 @@ def evaluate_trajectories(
         "learned_states": f_path,
         "reference_exit_time": g_exit,
         "learned_exit_time": f_exit,
+        "comparison_exit_time": common_exit,
+        "reference_exit_state": g_boundary / model.radius,
+        "learned_exit_state": f_boundary / model.radius,
+        "reference_last_accepted_time": g_last,
+        "learned_last_accepted_time": f_last,
         "reference_survival": g_alive.to(model.dtype).mean(dim=1),
         "learned_survival": f_alive.to(model.dtype).mean(dim=1),
         "common_count": count,
         "trajectory_error": error,
         "trajectory_error_mean": mean_error,
         "trajectory_error_std": std_error,
-        "visited_field_rmse": torch.sqrt(_mean(field_on_path.square(), f_alive)),
+        "visited_field_rmse": torch.sqrt(_mean(field_on_path.square(), both)),
         "mass_gap_mean": _mean(mass_gap, both),
         "mass_change_reference": _mean(g_mass - initial_mass, g_alive),
         "mass_change_learned": _mean(f_mass - initial_mass, f_alive),
-        "mass_rate_gap_mean": _mean(mass_rate_gap, f_alive),
+        "mass_rate_gap_mean": _mean(mass_rate_gap, both),
         "norm_gap_mean": _mean((f_norm - g_norm).abs(), both),
         "norm_change_reference": _mean(g_norm - initial_norm, g_alive),
         "norm_change_learned": _mean(f_norm - initial_norm, f_alive),
         "radial_rate_reference": _mean((g_path * g_at_g).sum(dim=-1), g_alive),
         "radial_rate_learned": _mean((f_path * f_at_f).sum(dim=-1), f_alive),
-        "radial_rate_gap_mean": _mean(radial_gap, f_alive),
+        "radial_rate_gap_mean": _mean(radial_gap, both),
     }
     if refine:
         report["reference_refinement"] = (

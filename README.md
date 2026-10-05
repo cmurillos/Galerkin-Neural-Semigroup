@@ -44,7 +44,7 @@ def weak(u, v, dx, ds):
 
 problem = NeuralSemigroupProblem(basis=basis, weak=weak, radius=1.5, sobolev_order=1)
 model = problem.train(
-    hidden=(64, 64), lipschitz="auto", samples=10_000, batch_size=256, epochs=1_000, lr=1e-3, seed=0
+    hidden=(64, 64), samples=10_000, batch_size=256, epochs=1_000, lr=1e-3, seed=0
 )
 z0 = model.project(lambda x: torch.sin(torch.pi * x[:, :1]))
 times = torch.linspace(0, 0.2, 21, dtype=model.dtype, device=model.device)
@@ -85,7 +85,6 @@ def weak(u, v, dx, ds):
 study = gns.System(basis=basis, weak=weak, radius=1.5, sobolev_order=1)
 model = study.train(
     hidden=(64, 64),
-    lipschitz="auto",
     samples=10_000,
     batch_size=256,
     epochs=1_000,
@@ -95,7 +94,7 @@ model = study.train(
 initial = model.state(lambda x: torch.sin(torch.pi * x[:, :1]))
 times = torch.linspace(0, 0.2, 21, dtype=model.dtype, device=model.device)
 path = model.evolve(initial, times, order=4)
-u_t = path.at(times[-1])
+u_t = path.at(path.times[-1])  # last completed interior output
 values = u_t.values(points)
 all_values = path.values(points)  # reconstruct all times in one spatial lookup
 velocity = u_t.velocity()
@@ -110,8 +109,8 @@ from `u_t.gradient(points)` and `u_t.hessian(points)`, which differentiate
 spatially. For explicit interoperability use `model.from_coefficients(z)`,
 `u_t.coefficients()` and `path.coefficients()`. `path.at(t)` requires a
 recorded output time; it does not interpolate. The radius is fixed by the
-study; `path.exit_status()` reports the last numerical interior state when
-the local flow exits its open ball.
+study; `path.exit_status()` reports the last numerical interior state and
+the separate boundary event when the local flow reaches its open-ball boundary.
 The output times may increase or decrease and include negative values;
 `initial` is the state at the first requested time.
 
@@ -170,19 +169,29 @@ spatial Sobolev regularity of the PDE solution.
 
 Training and validation draw independent fixed samples from normalized volume on
 the ball. If `ξ` is Gaussian and `s` uniform on `(0,1)`, then
-`x=s^(1/N) ξ/||ξ||₂`. Adam trains the `tanh` MLP with exact spectral projection;
-validation selects the best epoch. The `lipschitz="auto"` budget estimates
-`||Dg_R||₂` at sampled points using indexed derivatives. Its optional margin is
-heuristic, not a certified bound for `G`; a positive numeric budget may be supplied.
+`x=s^(1/N) ξ/||ξ||₂`. Samples that round onto the boundary are regenerated.
+Adam trains a `tanh` MLP with free weights; validation selects the best epoch.
+There is no `lipschitz` training argument or spectral normalization. The product
+of the layer spectral norms is a finite a posteriori bound for each fixed
+network inside the ball; it need not remain small or uniform across models.
 
 ## Local flow and comparable integration
 
 `model.field(z)` and `model.velocity(z)` both give the learned physical-time
 field `Fθ(z)`. They are defined only when `||z||₂<R`. They raise at the boundary
 or outside it. `solve` integrates locally and raises `ngfield.DomainExitError`
-when a numerical step reaches the boundary. The error records the last accepted
-interior state and time; it does not certify the exact exit instant. No value of
-`Fθ` outside the ball is evaluated.
+at the first numerical boundary contact. The error retains `time` and
+`last_state` for the last accepted interior point and separately records
+`exit_time`, `exit_state` and `exit_mask`. Completed requested outputs remain
+strictly interior. The boundary event is located on the accepted Taylor
+polynomial, even if its endpoint reenters the ball; it is an approximation,
+not a certificate of the exact ODE exit. No field call outside the ball occurs.
+
+`model.velocity_zero_extended(z)` is a separate convention: interior velocity
+for `||z||<R`, exactly zero for `||z||>=R`. This may be discontinuous. Its
+interior Lipschitz bound does not cover the jump, and `solve`/`evolve` never
+use it to freeze or continue the trajectory. Local identity, composition and
+inverse apply only when every involved trajectory remains inside the ball.
 
 Both `G.solve` and `model.solve` call **the same NGF Taylor-jet integrator** in
 physical time. Use the same `times`, `order`, `step` or `tolerance`, and optionally
@@ -208,10 +217,12 @@ model.save("heat.gns")
 restored = problem.load("heat.gns")
 ```
 
-Schema 5 stores the open domain and Sobolev order along with network state,
+Schema 6 stores free weights, exterior-zero convention, open domain and Sobolev
+order along with network state,
 training metadata and basis signature. Loading requires a compatible problem and
 basis; the signature cannot prove arbitrary basis functions are identical. Schemas
-1–4 remain loadable with their **historical** time scaling and support rules.
+1–5 retain their historical spectral projection; schemas 1–4 also retain their
+time scaling and support rules. Loading never silently converts those models.
 New models do not have a time scale or an exterior taper.
 
 For an explicit older `ngfield.GalerkinProblem`, use
@@ -239,7 +250,7 @@ print(flow_report["trajectory_error_mean"], flow_report["common_count"])
 
 `evaluate_field` reports RMS field error, one derivative RMS value per order
 `0,...,k`, the aggregate H^k RMS, radial bins on `[0,1)`, sampled derivative
-norms of both fields, and the network's separate spectral upper bound. The
+norms of both fields, and the network's separate product-of-layer-norms upper bound. The
 reference sampled maximum is **not** a global Lipschitz upper bound. Custom
 `radial_edges` may be passed; empty bins return `nan` with zero count.
 
@@ -249,7 +260,9 @@ deviation, same-state field error along learned paths, per-component integral
 and L²-norm changes, radial rates, exit times and survival fractions. The
 generic problem need not conserve integral or norm. Missing states after exit
 are `nan`; missing exit times mean no exit was observed by the final requested
-time. Aggregates include the number of common surviving trajectories, so an
+time. Reports keep numerical boundary states and last interior times separate.
+`comparison_exit_time` records the first exit of either field in the requested
+time direction. Error and field/rate-gap aggregates use only common survivors, so an
 error curve is not mistaken for a fixed cohort. The optional `refine=True`
 adds NGF's temporal step/tolerance refinement indicator for both fields; it
 can be expensive and is not a certified error bound. None of these statistics

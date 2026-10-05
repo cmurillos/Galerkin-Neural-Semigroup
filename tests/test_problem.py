@@ -34,7 +34,6 @@ class ProblemContractTests(unittest.TestCase):
         self.assertEqual(problem.radius, 2.0)
         semigroup = problem.train(
             hidden=(),
-            lipschitz=2.0,
             samples=8,
             batch_size=4,
             epochs=1,
@@ -58,7 +57,6 @@ class ProblemContractTests(unittest.TestCase):
             )
         training = {
             "hidden": (),
-            "lipschitz": 2.0,
             "samples": 2,
             "batch_size": 2,
             "epochs": 1,

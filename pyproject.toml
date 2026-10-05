@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "galerkin-neural-semigroup"
 version = "0.1.0"
-description = "Galerkin-supervised neural flows with exact semigroup structure"
+description = "Galerkin-supervised local neural flows on an open coordinate ball"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "BSD-3-Clause"
@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "torch>=2.4,<3",
-  "numerical-galerkin-field @ git+https://github.com/cmurillos/Numerical-Galerkin-Field.git@83da38eeb4700a7299d52d28977a12c71eed9a76",
+  "numerical-galerkin-field @ git+https://github.com/cmurillos/Numerical-Galerkin-Field.git@470dec6943d0672cbfda2bacd6d5ee4a922297d3",
 ]
 
 [project.optional-dependencies]

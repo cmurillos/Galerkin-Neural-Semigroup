@@ -38,11 +38,13 @@ Changing `R` generally changes `g_R` and calls for new training. Additional
 radius transfer is justified only for a separately established symmetry of a
 particular problem. There is no arbitrary time normalization parameter.
 
-The network and its physical field are defined only in the open ball. Direct
-field evaluation at or beyond its boundary raises; no taper or projected
-exterior values are fitted. Some trajectories leave this ball. In that case a
-local numerical solve reports `DomainExitError` instead of returning a value
-outside the model's domain. No invariance of the ball is asserted.
+The model's ODE field is restricted to the open ball. Direct `field` and
+`velocity` calls at or beyond its boundary raise. The separate
+`velocity_zero_extended` convention equals the interior field for `||z||<R`
+and exactly zero for `||z||>=R`; it is never used to integrate or continue a
+trajectory. This convention may jump and does not inherit the interior
+Lipschitz bound. A local solve stops at the first numerical boundary contact
+and reports `DomainExitError`. No invariance or global flow is asserted.
 
 ## D-003 — Indexed H^k objective and sample measure
 
@@ -72,7 +74,8 @@ coordinates; it does not promote the physical PDE state to a spatial H^k space.
 
 Sampling uses `x=s^(1/N)ξ/||ξ||₂` with `ξ` standard Gaussian and
 `s∼Uniform(0,1)`. Train and validation samples are drawn once and held fixed;
-the latter is independent. Targets are prepared in batches, detached **after**
+the latter is independent. Samples that round onto the boundary in unit or
+physical coordinates are regenerated; every training point is strictly interior. Targets are prepared in batches, detached **after**
 differentiation, cached and checked for finiteness. Gradients through the neural
 field derivatives remain available for Adam.
 
@@ -82,21 +85,17 @@ Finite sampled derivatives do not by themselves prove those analytic hypotheses.
 For higher `k`, the chosen `tanh` network is smooth, but weak-form evaluation
 and numerical differentiation must still be suitable for the problem.
 
-## D-004 — Network and empirical spectral budget
+## D-004 — Free weights and a posteriori Lipschitz bound
 
-`fθ:B_N(1)→ℝ^N` is an autonomous affine `tanh` MLP. The exact spectral
-projection applies `W↦W/max(1,||W||₂/γ)` to each affine weight. With `d` layers
-and requested budget `L`, `γ=L^(1/d)`; the product of effective layer norms
-bounds the core's Lipschitz quotient. The physical coordinate scaling preserves
-that quotient within the ball. In eval mode weights are cached and detached
-from parameters while derivatives with respect to input states remain available.
-
-A manual positive `lipschitz` sets `L`. By default GNS samples the indexed first
-state derivatives of `g_R`, assembles their derivative matrices, and uses the
-largest sampled operator norm times `lipschitz_factor=1.5`, floored at `1e-6`.
-Finite probes and this margin cannot certify a global bound on general `G`.
-This budget procedure is an implementation heuristic, not a condition or
-parameter in the continuous mathematical objective.
+`fθ:B_N(1)→ℝ^N` is the restriction of an affine `tanh` MLP with free weights.
+There is no spectral projection, preassigned budget, automatic calibration
+or penalty on its layer norms. For each fixed finite set of weights,
+`Lθ=product_l ||W_l||₂` bounds its Lipschitz quotient because `tanh` is
+1-Lipschitz. This also bounds the physical field inside `B_N(R)`, by exact
+coordinate scaling. It need not be uniform across networks or dimensions.
+The measured layer norms and their product are diagnostics, not training
+constraints or trajectory-accuracy certificates. Eval weights are detached
+from parameters; input-state derivatives remain available.
 
 ## D-005 — Integration and domain
 
@@ -115,7 +114,14 @@ with `step`. The same `times`, `order`, and time-step controls must be used for
 matched Galerkin/neural comparisons. The `radius=R` check can also be passed
 to `G.solve` to restrict both comparisons to the same domain. The algorithm
 evaluates the field only at accepted interior states; a candidate outside is
-rejected without evaluating the field there.
+not returned. First contact is localized using roots of
+`||P(u)||₂²-R²` for the accepted degree-p Taylor polynomial `P`, including
+contacts followed by reentry. Only jets at the interior start are evaluated.
+The event time/state and contacting batch mask are separate from completed
+interior outputs and the last accepted interior state. In adaptive mode the
+error check precedes event detection, so rejected polynomials do not declare
+an exit. Event data approximate the ODE contact and depend on integration
+accuracy; they do not certify the exact exit or prolong the solution.
 
 The adaptive estimate does not certify global accuracy. Taylor differentiation
 can be expensive at high order and explicit time stepping can be problematic
@@ -124,18 +130,20 @@ solutions exist; `defect` measures only numerical composition error.
 
 ## D-006 — Training and persistence
 
-Adam, uniform volume, fixed validation, exact spectral projection and cached
+Adam, uniform volume, fixed validation, free affine weights and cached
 reference targets are fixed choices. Training exposes architecture widths,
-manual or empirical Lipschitz budget, dataset size, minibatch size, epochs,
+dataset size, minibatch size, epochs,
 learning rate, seed, device and dtype. The best independent validation epoch
 is restored. Metadata records `R`, `k`, normalization, training settings,
-quadrature details, calibration method and exact NGF source revision.
+quadrature details, exterior/exit convention and exact NGF source revision.
 
-Schema-5 checkpoints record the open-ball domain and `k` with model weights.
+Schema-6 checkpoints record free weights, the open-ball domain, the exterior-zero
+convention and `k` with model weights.
 Loading checks reduced dimension, basis signature, radius, domain and Sobolev
 order. The basis signature is a compatibility guard, not a content hash.
-Older schemas 1–4 are read using their own field normalization, time scaling
-and historical support rules, without changing their meaning. New training
+Older schemas 1–5 retain spectral projection; schemas 1–4 also retain their own
+field normalization, time scaling and historical support rules. They are never
+silently converted to free-weight models. New training
 does not generate those schemas.
 
 ## D-007 — Scope of a comparison
@@ -164,7 +172,7 @@ and maximum sampled operator norms of first derivatives for both fields.
 NGF supplies the reference indexed derivatives; GNS evaluates the learned
 ones. The maximum sampled norm of `Dg_R` is an empirical lower estimate of its
 supremum, not a certified global Lipschitz upper bound. The existing network
-spectral bound is reported separately. Empty radial bins have zero count and
+product-of-layer-norms bound is reported separately. Empty radial bins have zero count and
 an undefined (`nan`) RMS value.
 
 Trajectory evaluation uses NGF's same Taylor integrator, order, times and
@@ -177,8 +185,11 @@ Both integrations stop at the open-ball boundary. Each output-time aggregate
 is conditioned on trajectories for which the required states still exist;
 the counts and separate survival fractions accompany these values. Missing
 states are `nan`, and a missing exit time means no exit was observed by the
-last requested time. The time recorded by the solver is a numerical last
-interior time, not the exact first exit. Optional time-step refinement is a
+last requested time. The recorded exit time and boundary state describe the numerical contact;
+last accepted interior times are separate report keys. `comparison_exit_time`
+is the first contact of either field in the integration direction (the earlier
+time forwards, the later time backwards). Error and field/rate-gap aggregates
+use only common survivors. Boundary events are not appended to the paths. Optional time-step refinement is a
 numerical indicator, not a certified error bound; a refined trajectory may
 exit before its coarse counterpart.
 
@@ -187,9 +198,9 @@ exit before its coarse counterpart.
 `Geometry`, `Space`, restrictions and weak-form operators exposed by GNS
 refer to the exact NGF objects. `System(basis,weak,radius,sobolev_order,...)`
 defines a study, `study.train(...)` produces a function-valued `Model`, and
-`study.load(path)` reconstitutes a matching schema-5 model. The historical
+`study.load(path)` reconstitutes a matching local model. The historical
 `NeuralSemigroupProblem` and `NeuralSemigroup` remain available unchanged.
-The new workflow requires an open-ball schema-5 model; it does not reinterpret
+The new workflow requires an open-ball schema-5 or schema-6 model; it does not reinterpret
 the historical time and taper semantics of schemas 1–4.
 
 `model.state(u0)` projects a physical initial function, while
@@ -199,7 +210,8 @@ perform the same spatial evaluation, componentwise integral and L² norm as
 the numerical workflow. `model.evolve(initial,times,order,step|tolerance)`
 uses the shared Taylor integrator and returns only completed requested times
 if a numerical boundary exit occurs. `solution.exit_status()` then also
-contains the last accepted interior state and time. `solution.at(t)` accepts
+contains the last accepted interior state/time and a separate numerical
+boundary event. The event is a `Function`, not an admissible phase `State`. `solution.at(t)` accepts
 only recorded output times; it does not interpolate.
 
 For `z=state.coefficients()`, `state.velocity()` represents the physical
@@ -226,9 +238,8 @@ after summing squared errors over every output component and multi-index;
 this is the same empirical norm of D-002 without derivative weights. The
 reference targets remain cached on fixed sampled states. If the GPU cannot
 comfortably hold them, they are stored on CPU and each selected batch is
-transferred without changing its values or sampling order. Exact spectral
-projections of a training network are reused within a batch and its backward
-pass; the associated graph is discarded before the next optimizer step.
+transferred without changing its values or sampling order. Affine weights are reused within a batch without projection;
+no cached training graph survives an optimizer step.
 
 `Model` initializes `ngfield.FunctionalFlow` with a compatible autonomous
 field. Independent evaluation accepts strictly increasing or decreasing
@@ -236,3 +247,16 @@ time grids, including negative values, with the initial state at the first
 requested time. Prefixes of paths that leave the ball come from NGF's
 already accepted output states. Reports retain the requested order and their
 normalized metrics; numerical exit times remain approximate.
+
+## D-011 — Local flow until first boundary contact
+
+For each initial point inside the open ball, the model represents the unique
+maximal interior ODE solution. Identity, composition and inverse relate only
+admissible domains: `Psi_t:D_t→D_-t`, with inverse `Psi_-t`. These domains
+may be proper subsets or empty; the model is not a group on the entire span.
+Comparison with Galerkin ends at the first exit of either trajectory. A
+boundary event terminates evaluation, without clipping, freezing, restarting
+or integrating the exterior-zero convention. Fixed-radius exits neither
+prove PDE blowup nor indicate numerical solver failure. New schema-6 models
+use the free-weight contract of D-004; loading schemas 1–5 preserves their
+historical field meanings.

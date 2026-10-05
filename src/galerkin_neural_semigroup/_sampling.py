@@ -4,14 +4,26 @@ import torch
 from ngfield import multi_indices
 
 
-def sample_unit_ball(count, dimension, *, generator, device, dtype):
+def sample_unit_ball(count, dimension, *, generator, device, dtype, radius=1.0):
     """Sample normalized Lebesgue volume on the open unit ball."""
-    directions = torch.randn(count, dimension, generator=generator, device=device, dtype=dtype)
-    directions = directions / torch.linalg.vector_norm(directions, dim=-1, keepdim=True).clamp_min(
-        torch.finfo(dtype).tiny
-    )
-    radii = torch.rand(count, 1, generator=generator, device=device, dtype=dtype)
-    return directions * radii.pow(1.0 / dimension)
+    states = torch.empty(count, dimension, device=device, dtype=dtype)
+    pending = torch.arange(count, device=device)
+    while len(pending):
+        directions = torch.randn(
+            len(pending), dimension, generator=generator, device=device, dtype=dtype
+        )
+        norms = torch.linalg.vector_norm(directions, dim=-1, keepdim=True)
+        directions = directions / norms.clamp_min(torch.finfo(dtype).tiny)
+        radii = torch.rand(len(pending), 1, generator=generator, device=device, dtype=dtype)
+        candidates = directions * radii.pow(1.0 / dimension)
+        valid = (
+            (norms[:, 0] > 0)
+            & (torch.linalg.vector_norm(candidates, dim=-1) < 1)
+            & (torch.linalg.vector_norm(radius * candidates, dim=-1) < radius)
+        )
+        states[pending[valid]] = candidates[valid]
+        pending = pending[~valid]
+    return states
 
 
 def unit_ball_targets(reference, states, *, radius, order, batch_size, storage_device=None):

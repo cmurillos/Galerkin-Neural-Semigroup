@@ -146,3 +146,20 @@ def test_negative_time_exit_retains_prefix_and_survival():
     assert 0.0 > report["learned_exit_time"][0] > -0.11
     assert torch.isnan(report["learned_states"][2, 0]).all()
     assert torch.isfinite(report["learned_refinement"][:2, 0]).all()
+
+
+def test_comparison_ends_at_reference_first_exit_and_backward_time_uses_maximum():
+    model = reaction_model(radius=1.0, constant=True)
+    initial = torch.tensor([[0.9, 0.0]], dtype=model.dtype)
+    times = torch.tensor([0.0, -0.05, -0.15, -0.3], dtype=model.dtype)
+    report = model.evaluate_trajectories(initial, times, step=0.02)
+    assert report["common_count"].tolist() == [1, 1, 0, 0]
+    torch.testing.assert_close(report["comparison_exit_time"], report["reference_exit_time"])
+    assert torch.isnan(report["learned_exit_time"]).all()
+    assert torch.isnan(report["trajectory_error_mean"][2:]).all()
+    assert torch.isnan(report["visited_field_rmse"][2:]).all()
+    assert torch.isnan(report["mass_rate_gap_mean"][2:]).all()
+    assert torch.isnan(report["radial_rate_gap_mean"][2:]).all()
+    assert report["reference_exit_state"].shape == initial.shape
+    assert torch.linalg.vector_norm(report["reference_exit_state"][0]) == pytest.approx(1.0)
+    assert report["reference_last_accepted_time"][0] > report["reference_exit_time"][0]

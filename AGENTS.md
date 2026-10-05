@@ -62,24 +62,25 @@ The original coordinate API exports `NeuralSemigroupProblem` and
 and weak-form vocabulary. Examples must not construct or expose the reference
 evaluator.
 
-The normalized network is an autonomous `tanh` MLP with exact spectral weight
-projection. Adam trains on one fixed volume sample; validation uses a distinct
-fixed sample and restores the best epoch. Targets must be differentiated at
-`Rx`, scaled by `R^(|α|-1)`, checked, **then detached and cached**. Neural
-state derivatives retain parameter gradients. Eval cache detaches model
-parameters but must allow state derivatives for Taylor integration.
+The normalized network is an autonomous `tanh` MLP with free affine weights.
+Do not add spectral normalization, manual/automatic budgets or Lipschitz
+penalties to new training. Adam uses one fixed volume sample and distinct fixed
+validation; restore the best epoch. Regenerate samples that round to the
+boundary in either unit or physical coordinates. Targets must be differentiated
+at `Rx`, scaled by `R^(|α|-1)`, checked, then detached and cached. Neural state
+derivatives retain parameter gradients. Eval weights are detached while input
+state derivatives remain available. The product of layer spectral norms is an
+a posteriori bound for each fixed network inside the ball, not a uniform bound
+across models or on the discontinuous exterior convention.
 
-The optional `lipschitz="auto"` budget uses NGF indexed first derivatives at
-sampled points and a heuristic factor. It is not a global bound on arbitrary
-`G`; the projected neural core does have its specified spectral budget. Record
-calibration and sampling metadata honestly.
-
-New `semigroup.field` is defined on the **open** `B_N(R)` only. `velocity`
-returns the same physical-time field. Reject boundary/exterior field calls and
-stop solves with `ngfield.DomainExitError` if a candidate step exits. Do not
-claim the ball is invariant, create an exterior taper, or extrapolate a field.
-The time and last state in the exception are numerical, not an exact exit-time
-certificate.
+`semigroup.field` and `velocity` remain defined only on the open `B_N(R)`.
+`velocity_zero_extended` is separate: exactly zero for `||z||>=R`, with no
+smoothing, projection, continuation or freezing. The shared solver records the
+first numerical contact of the accepted Taylor polynomial in `DomainExitError`;
+exit event/time/mask are separate from the last interior point and completed
+outputs. Never turn an event into an admissible `State`. Identity, composition
+and inverse require all local domains to be admissible. Comparisons end at
+first exit of either field, in the requested time direction.
 
 Both direct `G.solve` and neural `semigroup.solve` call NGF
 `integrate_field`, using the same Taylor `order=p` and matched `step` or
@@ -95,16 +96,15 @@ Independent trajectory evaluation accepts strictly monotone time grids in
 either direction, including negative times. Fixed reference targets may be
 cached on CPU for large GPU studies; batches must return to the model device
 without changing samples, indexed weights or parameter gradients. A training
-batch may reuse the exact projected weights, but the cached graph must not
+batch may reuse the affine weights without projection, but the cached graph must not
 survive an optimizer step.
 
 ## Compatibility and reproducibility
 
-Schema 5 saves the local-field marker, `k`, radius, basis signature, model
+Schema 6 saves free weights, exterior-zero convention, the local-field marker, `k`, radius, basis signature, model
 state, history and metadata. It contains neither the weak-form callable nor
-numerical reference. Loading needs a compatible problem. Historical schemas
-1–4 retain their past normalization, taper and time factors. Never silently
-reinterpret them as schema 5. Use `torch.load(..., weights_only=True)`.
+numerical reference. Loading needs a compatible problem. Historical schemas 1–5 retain spectral projection; 1–4 also retain their past
+normalization, taper and time factors. Never silently reinterpret them as schema 6. Use `torch.load(..., weights_only=True)`.
 
 Public docs and code are English. Update README, design contract, example,
 changelog and tests for method changes. Keep the package-root API compact;
@@ -117,8 +117,8 @@ make an experiment look favorable.
 
 - `problem.py`: private NGF reference, targets, H^k training and loading.
 - `_sampling.py`: normalized volume and scaled indexed target preparation.
-- `_network.py`: projected MLP, new local wrapper and historical wrappers.
-- `_lipschitz.py`: sampled first-derivative spectral calibration.
+- `_network.py`: free-weight MLP, local wrapper, zero convention and legacy wrappers.
+- `_lipschitz.py`: retained sampled derivative diagnostic; never a training budget.
 - `semigroup.py`: public learned flow and versioned checkpoints.
 - `_evaluation.py`: independent normalized field and trajectory diagnostics;
   obtain reference derivatives, integral weights and integration from NGF.
@@ -140,6 +140,6 @@ python -m build
 
 Test exact radius derivative scaling (including a mixed derivative), gradients
 through H^k loss, open-ball failure, matched Galerkin/neural integrator calls,
-checkpoint schema 5 and legacy schemas 1–4. Include an end-to-end reduced
+checkpoint schema 6 and legacy schemas 1–5. Include an end-to-end reduced
 training smoke test when changing user workflow. Report any untested device,
 stiffness or PDE examples accurately.

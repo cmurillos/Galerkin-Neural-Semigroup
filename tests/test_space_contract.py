@@ -27,7 +27,6 @@ class SpaceCompatibilityTests(unittest.TestCase):
         problem = NeuralSemigroupProblem(basis=basis, weak=weak, radius=1.0)
         semigroup = problem.train(
             hidden=(5,),
-            lipschitz=3.0,
             samples=12,
             batch_size=6,
             epochs=1,
@@ -69,7 +68,6 @@ class SpaceCompatibilityTests(unittest.TestCase):
         problem = NeuralSemigroupProblem(basis=basis, weak=weak, radius=1.0)
         semigroup = problem.train(
             hidden=(),
-            lipschitz=3.0,
             samples=12,
             batch_size=6,
             epochs=1,

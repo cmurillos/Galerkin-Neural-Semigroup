@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Align new training with the thesis local-flow convention: free affine weights,
+  a posteriori Lipschitz diagnostics, and separate exterior-zero evaluation.
+  Remove the training Lipschitz budget/calibration arguments. Save schema 6;
+  restore schemas 1–5 with their historical parameterization and fields.
+- Locate first numerical boundary contact through the shared NGF integrator;
+  retain only interior requested outputs and separate event states/times from
+  last interior points. Restrict comparison gaps to common surviving paths,
+  report first comparison exit in either direction, and regenerate rounded
+  boundary samples. No stopped or exterior trajectory is created.
+
 - Accept held-out trajectories in either time direction, including negative
   times, and reuse accepted states on numerical ball exit. Preserve normalized
   reports and matched integration settings for both fields.

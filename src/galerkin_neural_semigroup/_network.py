@@ -19,17 +19,15 @@ LEGACY_SUPPORT_START_RADIUS = 0.9
 LEGACY_SUPPORT_END_RADIUS = 1.0
 
 
-class _SpectralMLP(nn.Module):
-    """A tanh MLP whose affine weights are projected onto spectral balls."""
+class _MLP(nn.Module):
+    """A tanh MLP with free affine weights and an a posteriori Lipschitz bound."""
 
-    def __init__(self, dimension, hidden, lipschitz, *, device, dtype):
+    def __init__(self, dimension, hidden, *, device, dtype):
         super().__init__()
         self.dimension = positive_integer(dimension, "dimension")
         self.hidden = hidden_widths(hidden)
-        self.lipschitz_bound = positive_real(lipschitz, "lipschitz")
         widths = (self.dimension, *self.hidden, self.dimension)
         self.depth = len(widths) - 1
-        self.layer_bound = self.lipschitz_bound ** (1.0 / self.depth)
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
         self._evaluation_weights = None
@@ -61,9 +59,7 @@ class _SpectralMLP(nn.Module):
             raise ValueError("states and the neural field must share device and dtype.")
 
     def _project(self, weight):
-        norm = torch.linalg.matrix_norm(weight, ord=2)
-        scale = torch.clamp(norm / self.layer_bound, min=1.0)
-        return weight / scale
+        return weight
 
     def effective_weights(self):
         if not self.training:
@@ -79,11 +75,7 @@ class _SpectralMLP(nn.Module):
 
     @contextmanager
     def reuse_training_weights(self):
-        """Project once within a batch while retaining parameter gradients.
-
-        No projected graph survives an optimizer update. Ordinary calls and
-        checkpoint parameters keep their original semantics.
-        """
+        """Reuse affine weights in a batch while retaining parameter gradients."""
         previous = self._training_weights
         if self.training and previous is None:
             self._training_weights = tuple(self._project(weight) for weight in self.weights)
@@ -148,6 +140,26 @@ class _SpectralMLP(nn.Module):
         return {
             "dimension": self.dimension,
             "hidden": list(self.hidden),
+            "weight_constraint": "none",
+        }
+
+
+class _SpectralMLP(_MLP):
+    """Historical projected MLP; used only to restore schemas 1 through 5."""
+
+    def __init__(self, dimension, hidden, lipschitz, *, device, dtype):
+        super().__init__(dimension, hidden, device=device, dtype=dtype)
+        self.lipschitz_bound = positive_real(lipschitz, "lipschitz")
+        self.layer_bound = self.lipschitz_bound ** (1.0 / self.depth)
+
+    def _project(self, weight):
+        norm = torch.linalg.matrix_norm(weight, ord=2)
+        return weight / torch.clamp(norm / self.layer_bound, min=1.0)
+
+    def configuration(self):
+        return {
+            "dimension": self.dimension,
+            "hidden": list(self.hidden),
             "lipschitz": self.lipschitz_bound,
         }
 
@@ -157,8 +169,8 @@ class _LocalBallField(nn.Module):
 
     def __init__(self, core, radius, sobolev_order):
         super().__init__()
-        if not isinstance(core, _SpectralMLP):
-            raise TypeError("core must be a spectral MLP.")
+        if not isinstance(core, _MLP):
+            raise TypeError("core must be a tanh MLP.")
         self.core = core
         self.radius = positive_real(radius, "radius")
         if (
@@ -200,6 +212,24 @@ class _LocalBallField(nn.Module):
         self._states(states)
         return self.radius * self.core(states / self.radius)
 
+    def zero_extended(self, states):
+        """Interior field and exact zero for ||z|| >= R; never used by solve.
+
+        This discontinuous convention does not inherit the interior Lipschitz
+        bound or define a continuation of the local flow.
+        """
+        self.core._states(states)
+        if not bool(torch.isfinite(states).all()):
+            raise ValueError("states must be finite.")
+        flat = states.reshape(-1, self.dimension)
+        inside = torch.linalg.vector_norm(flat, dim=-1) < self.radius
+        result = torch.zeros_like(flat)
+        # Preserve a zero input gradient even for an entirely exterior batch.
+        if states.requires_grad:
+            result = result + flat * 0
+        result[inside] = self.radius * self.core(flat[inside] / self.radius)
+        return result.reshape(states.shape)
+
     def spectral_norms(self):
         return self.core.spectral_norms()
 
@@ -212,6 +242,7 @@ class _LocalBallField(nn.Module):
             "coordinate_normalization": UNIT_BALL_NORMALIZATION,
             "domain": OPEN_BALL_DOMAIN,
             "sobolev_order": self.sobolev_order,
+            **({"exterior_convention": "zero"} if type(self.core) is _MLP else {}),
         }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):

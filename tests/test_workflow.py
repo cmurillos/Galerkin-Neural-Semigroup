@@ -78,6 +78,11 @@ def test_open_ball_exit_returns_only_completed_function_states():
     times = torch.tensor([0.0, 0.05, 0.15], dtype=model.dtype)
     solution = model.evolve(initial, times, step=0.05)
     assert solution.exit_status()["exited"]
+    event = solution.exit_status()
+    assert event["exit_time"] == pytest.approx(0.1)
+    assert isinstance(event["exit_state"], Function)
+    assert not isinstance(event["exit_state"], State)
+    assert event["exit_state"].norm_L2() == pytest.approx(1.0)
     assert solution.coefficients().shape == (2, 2)
     assert solution.exit_status()["last_accepted_state"].norm_L2() < 1
     with pytest.raises(ValueError, match="open ball"):
@@ -94,7 +99,7 @@ def test_study_exports_same_space_vocabulary_and_loads_trained_model(tmp_path):
         sobolev_order=0,
     )
     assert study.basis is basis and study.space is basis.space and study.geometry is geometry
-    model = study.train(hidden=(2,), lipschitz=2.0, samples=8, batch_size=4, epochs=1, seed=17)
+    model = study.train(hidden=(2,), samples=8, batch_size=4, epochs=1, seed=17)
     assert model.training_history["training_loss"]
     path = tmp_path / "flow.gns"
     model.save(path)

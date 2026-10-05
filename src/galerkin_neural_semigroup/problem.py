@@ -6,8 +6,8 @@ from pathlib import Path
 import torch
 from ngfield import multi_indices, state_derivatives
 
-from ._lipschitz import estimate_reference_lipschitz
 from ._network import (
+    _MLP,
     COMPACT_SUPPORT,
     LEGACY_COMPACT_SUPPORT,
     LEGACY_SUPPORT_END_RADIUS,
@@ -103,8 +103,8 @@ class NeuralSemigroupProblem:
     The normal route receives an operational ngfield basis, a complete weak
     form, and the radius of the reduced training ball. Geometry, components and
     restrictions are already carried by the basis. The sampling measure is uniform
-    volume on the ball. The tanh MLP, indexed Sobolev loss and exact
-    spectral projection remain fixed by the method.
+    volume on the open ball. The tanh MLP has free weights; its finite
+    Lipschitz bound is measured after training, not imposed on the optimizer.
     """
 
     def __init__(
@@ -171,8 +171,6 @@ class NeuralSemigroupProblem:
         self,
         *,
         hidden,
-        lipschitz="auto",
-        lipschitz_factor=1.5,
         samples=10_000,
         batch_size=256,
         epochs=1_000,
@@ -184,9 +182,6 @@ class NeuralSemigroupProblem:
     ):
         """Train the normalized field against indexed derivatives of the reference."""
         hidden = hidden_widths(hidden)
-        if lipschitz != "auto":
-            lipschitz = positive_real(lipschitz, "lipschitz")
-        lipschitz_factor = positive_real(lipschitz_factor, "lipschitz_factor")
         samples = positive_integer(samples, "samples", minimum=2)
         batch_size = min(positive_integer(batch_size, "batch_size"), samples)
         epochs = positive_integer(epochs, "epochs")
@@ -205,28 +200,6 @@ class NeuralSemigroupProblem:
         if coordinate_system.dimension != self.dimension:
             raise RuntimeError("The internal coordinate field and basis dimensions differ.")
 
-        if lipschitz == "auto":
-            estimate, probes = estimate_reference_lipschitz(
-                coordinate_system,
-                self.dimension,
-                radius=self.radius,
-                batch_size=batch_size,
-                generator=_generator(device, seed + 1789),
-                device=device,
-                dtype=dtype,
-            )
-            lipschitz = max(1e-6, lipschitz_factor * estimate)
-            calibration = {
-                "mode": "empirical-indexed-derivatives",
-                "reference_estimate_normalized": estimate,
-                "probe_states": probes,
-                "factor": lipschitz_factor,
-                "certified_upper_bound": False,
-                "network_budget": lipschitz,
-            }
-        else:
-            calibration = {"mode": "manual", "network_budget": lipschitz}
-
         validation_samples = max(1, min(4096, samples // 10))
         train_unit_states = sample_unit_ball(
             samples,
@@ -234,6 +207,7 @@ class NeuralSemigroupProblem:
             generator=generator,
             device=device,
             dtype=dtype,
+            radius=self.radius,
         )
         validation_unit_states = sample_unit_ball(
             validation_samples,
@@ -241,6 +215,7 @@ class NeuralSemigroupProblem:
             generator=generator,
             device=device,
             dtype=dtype,
+            radius=self.radius,
         )
         target_storage = _target_storage(
             device,
@@ -267,10 +242,9 @@ class NeuralSemigroupProblem:
         )
 
         field = _LocalBallField(
-            _SpectralMLP(
+            _MLP(
                 self.dimension,
                 hidden,
-                lipschitz,
                 device=device,
                 dtype=dtype,
             ),
@@ -368,7 +342,9 @@ class NeuralSemigroupProblem:
             "method": {
                 "measure": "normalized-volume-ball",
                 "activation": "tanh",
-                "spectral_projection": "exact",
+                "weight_constraint": "none",
+                "exterior_convention": "zero",
+                "exit_policy": "first-boundary-contact",
                 "loss": "mean-squared-indexed-sobolev-error",
                 "sobolev_order": self.sobolev_order,
                 "loss_coordinates": UNIT_BALL_NORMALIZATION,
@@ -388,11 +364,10 @@ class NeuralSemigroupProblem:
                 "target_mode": "cached",
                 "target_storage": str(target_storage),
                 "network_radius": 1.0,
-                "lipschitz_calibration": calibration,
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
-            "reference_package": "numerical-galerkin-field@83da38ee",
+            "reference_package": "numerical-galerkin-field@470dec69",
         }
         return NeuralSemigroup(
             field=field,
@@ -408,14 +383,14 @@ class NeuralSemigroupProblem:
         device = compute_device(device)
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
         schema_version = checkpoint.get("schema_version")
-        if schema_version not in (1, 2, 3, 4, 5):
+        if schema_version not in (1, 2, 3, 4, 5, 6):
             raise ValueError("Unsupported Galerkin Neural Semigroup checkpoint schema.")
         configuration = checkpoint.get("field_configuration", {})
         if configuration.get("dimension") != self.dimension:
             raise ValueError("The checkpoint and problem basis dimensions differ.")
         if not isclose(float(checkpoint.get("radius")), self.radius, rel_tol=0, abs_tol=0):
             raise ValueError("The checkpoint and problem use different training radii.")
-        if schema_version == 5:
+        if schema_version in (5, 6):
             if "time_scale" in checkpoint:
                 raise ValueError("A local-field checkpoint cannot carry a time scale.")
             if configuration.get("sobolev_order") != self.sobolev_order:
@@ -431,17 +406,27 @@ class NeuralSemigroupProblem:
                 raise ValueError("The checkpoint records an unsupported dtype.")
         dtype = floating_dtype(dtype)
         coordinate_system = self._build_coordinate_system(device=device, dtype=dtype)
-        core = _SpectralMLP(
-            self.dimension,
-            configuration["hidden"],
-            configuration["lipschitz"],
-            device=device,
-            dtype=dtype,
-        )
-        if schema_version in (2, 3, 4, 5):
+        if schema_version == 6:
+            if (
+                configuration.get("weight_constraint") != "none"
+                or configuration.get("exterior_convention") != "zero"
+            ):
+                raise ValueError(
+                    "The checkpoint records an unsupported weight or exterior convention."
+                )
+            core = _MLP(self.dimension, configuration["hidden"], device=device, dtype=dtype)
+        else:
+            core = _SpectralMLP(
+                self.dimension,
+                configuration["hidden"],
+                configuration["lipschitz"],
+                device=device,
+                dtype=dtype,
+            )
+        if schema_version in (2, 3, 4, 5, 6):
             if configuration.get("coordinate_normalization") != UNIT_BALL_NORMALIZATION:
                 raise ValueError("The checkpoint records an unsupported coordinate normalization.")
-            if schema_version == 5:
+            if schema_version in (5, 6):
                 field = _LocalBallField(core, self.radius, self.sobolev_order)
             else:
                 if schema_version == 3 and (
