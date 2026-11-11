@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from galerkin_neural_semigroup import NeuralSemigroup
+from galerkin_neural_semigroup import problem as training
 from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP, _UnitBallField
 from galerkin_neural_semigroup.problem import _basis_signature, _field_loss, _target_storage
 
@@ -23,6 +24,40 @@ class Quadratic(torch.nn.Module):
 
     def forward(self, states):
         return self.weight * states.square()
+
+
+def test_repeated_training_reuses_only_matching_reference_targets(monkeypatch):
+    problem = heat_problem()
+    rate = -0.5
+
+    def weak(u, v, dx, ds):
+        return rate * u[0] * v[0] * dx
+
+    problem.weak = weak
+    calls = []
+    unit_ball_targets = training.unit_ball_targets
+
+    def counted(*args, **kwargs):
+        calls.append(None)
+        return unit_ball_targets(*args, **kwargs)
+
+    monkeypatch.setattr(training, "unit_ball_targets", counted)
+    settings = dict(samples=8, batch_size=4, epochs=1, device="cpu")
+    first = problem.train(hidden=(), **settings)
+    problem.train(hidden=(3,), **settings)
+    cached = problem.train(hidden=(), **settings)
+    assert len(calls) == 2
+    assert first.history == cached.history
+    z = torch.tensor([0.2, -0.1], dtype=first.dtype)
+    torch.testing.assert_close(first.velocity(z), cached.velocity(z), atol=0, rtol=0)
+
+    rate = -0.75
+    changed = problem.train(hidden=(), **settings)
+    assert len(calls) == 4
+    torch.testing.assert_close(changed._coordinate_system(z), rate * z)
+    assert changed.history != cached.history
+    problem.train(hidden=(), seed=1, **settings)
+    assert len(calls) == 6
 
 
 class TrainingTests(unittest.TestCase):
@@ -81,7 +116,7 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(semigroup.metadata["method"]["loss"], "mean-squared-indexed-sobolev-error")
         self.assertEqual(semigroup.metadata["training"]["sampling"], "volume")
         self.assertEqual(
-            semigroup.metadata["reference_package"], "numerical-galerkin-field@470dec69"
+            semigroup.metadata["reference_package"], "numerical-galerkin-field@11653265"
         )
         self.assertGreater(semigroup.metrics["effective_lipschitz_bound"], 0)
         self.assertEqual(semigroup.metadata["method"]["weight_constraint"], "none")

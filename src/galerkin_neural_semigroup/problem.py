@@ -77,10 +77,10 @@ def _target_storage(device, dtype, count, dimension, order, *, free_bytes=None):
 
 
 def _target_batch(targets, selection, device):
+    if isinstance(selection, torch.Tensor) and targets:
+        selection = selection.to(next(iter(targets.values())).device)
     return {
-        alpha: values[
-            selection.to(values.device) if isinstance(selection, torch.Tensor) else selection
-        ].to(device=device, non_blocking=True)
+        alpha: values[selection].to(device=device, non_blocking=True)
         for alpha, values in targets.items()
     }
 
@@ -128,6 +128,7 @@ class NeuralSemigroupProblem:
         self.sobolev_order = positive_integer(sobolev_order, "sobolev_order", minimum=0)
         self.dimension = dimension
         self._explicit_problem = None
+        self._training_reference = None
 
     @classmethod
     def from_galerkin(
@@ -166,6 +167,50 @@ class NeuralSemigroupProblem:
         if self._explicit_problem is None:
             return GalerkinField(weak=self.weak, **options)
         return self._explicit_problem.field(**options)
+
+    def _prepare_training_targets(self, reference, train_states, validation_states, *, batch_size):
+        device, dtype = train_states.device, train_states.dtype
+        settings = (
+            self.radius,
+            self.sobolev_order,
+            batch_size,
+            torch.get_float32_matmul_precision(),
+            torch.is_autocast_enabled(device.type),
+            torch.get_autocast_dtype(device.type),
+        )
+        cached = self._training_reference
+        if cached is not None:
+            old_reference, old_settings, old_train, old_validation, targets = cached
+            if (
+                settings == old_settings
+                and device == old_train.device
+                and dtype == old_train.dtype
+                and torch.equal(train_states, old_train)
+                and torch.equal(validation_states, old_validation)
+                and reference._same_fixed_action(old_reference)
+            ):
+                return targets
+        self._training_reference = None
+        target_storage = _target_storage(
+            device,
+            dtype,
+            len(train_states) + len(validation_states),
+            self.dimension,
+            self.sobolev_order,
+        )
+        targets = tuple(
+            unit_ball_targets(
+                reference,
+                states,
+                radius=self.radius,
+                order=self.sobolev_order,
+                batch_size=batch_size,
+                storage_device=target_storage,
+            )
+            for states in (train_states, validation_states)
+        )
+        self._training_reference = (reference, settings, train_states, validation_states, targets)
+        return targets
 
     def train(
         self,
@@ -217,29 +262,15 @@ class NeuralSemigroupProblem:
             dtype=dtype,
             radius=self.radius,
         )
-        target_storage = _target_storage(
-            device,
-            dtype,
-            samples + validation_samples,
-            self.dimension,
-            self.sobolev_order,
-        )
-        train_targets = unit_ball_targets(
+        train_targets, validation_targets = self._prepare_training_targets(
             coordinate_system,
             train_unit_states,
-            radius=self.radius,
-            order=self.sobolev_order,
-            batch_size=batch_size,
-            storage_device=target_storage,
-        )
-        validation_targets = unit_ball_targets(
-            coordinate_system,
             validation_unit_states,
-            radius=self.radius,
-            order=self.sobolev_order,
             batch_size=batch_size,
-            storage_device=target_storage,
         )
+        target_storage = next(iter(train_targets.values())).device
+        if target_storage == train_unit_states.device:
+            target_storage = device
 
         field = _LocalBallField(
             _MLP(
@@ -367,7 +398,7 @@ class NeuralSemigroupProblem:
             },
             "device": str(device),
             "dtype": str(dtype).removeprefix("torch."),
-            "reference_package": "numerical-galerkin-field@470dec69",
+            "reference_package": "numerical-galerkin-field@11653265",
         }
         return NeuralSemigroup(
             field=field,
