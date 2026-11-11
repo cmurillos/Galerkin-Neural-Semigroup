@@ -36,14 +36,17 @@ def unit_ball_targets(reference, states, *, radius, order, batch_size, storage_d
     indices = multi_indices(states.shape[-1], order)
     storage_device = states.device if storage_device is None else torch.device(storage_device)
     outputs = {alpha: torch.empty_like(states, device=storage_device) for alpha in indices}
+    scales = {alpha: radius ** (sum(alpha) - 1) for alpha in indices}
     for start in range(0, len(states), batch_size):
         state = states[start : start + batch_size]
         derivatives = reference.state_derivatives(radius * state, order)
+        finite = []
         for alpha in indices:
-            value = (radius ** (sum(alpha) - 1) * derivatives[alpha]).detach()
+            value = (scales[alpha] * derivatives[alpha]).detach()
             if value.shape != state.shape:
                 raise ValueError("The reference derivative changed the state shape.")
-            if not bool(torch.isfinite(value).all()):
-                raise FloatingPointError("The reference derivative returned nonfinite data.")
-            outputs[alpha][start : start + len(state)].copy_(value.to(storage_device))
+            finite.append(torch.isfinite(value).all())
+            outputs[alpha][start : start + len(state)].copy_(value)
+        if not bool(torch.stack(finite).all()):
+            raise FloatingPointError("The reference derivative returned nonfinite data.")
     return outputs

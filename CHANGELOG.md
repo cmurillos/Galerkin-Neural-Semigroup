@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reuse matching detached reference targets across training calls on the same
+  problem and reduce repeated CPU/GPU synchronization when preparing batches.
+- Reuse completed base trajectories in time refinement diagnostics.
+
 - Align new training with the thesis local-flow convention: free affine weights,
   a posteriori Lipschitz diagnostics, and separate exterior-zero evaluation.
   Remove the training Lipschitz budget/calibration arguments. Save schema 6;

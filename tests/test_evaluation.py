@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import torch
-from ngfield import SimplicialDomain, Space
+from ngfield import SimplicialDomain, Space, evolution, time_error
 
-from galerkin_neural_semigroup import NeuralSemigroupProblem
+from galerkin_neural_semigroup import NeuralSemigroupProblem, _evaluation
 from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP
 from galerkin_neural_semigroup.semigroup import NeuralSemigroup
 
@@ -91,6 +91,33 @@ def test_component_integrals_and_adaptive_refinement_keep_their_shapes():
     assert report["mass_change_reference"].shape == (len(times), 2)
     assert report["mass_rate_gap_mean"].shape == (len(times), 2)
     assert torch.isfinite(report["learned_refinement"]).all()
+
+
+@pytest.mark.parametrize("controls", [{}, {"step": 0.04}])
+def test_refinement_reuses_the_two_completed_base_paths(monkeypatch, controls):
+    model = reaction_model()
+    initial = torch.tensor([[0.4, 0.2], [0.2, -0.3]], dtype=model.dtype)
+    times = torch.tensor([0.0, 0.1, 0.2], dtype=model.dtype)
+    fields = {"reference": model._coordinate_system, "learned": model.field}
+    with torch.no_grad():
+        expected = {
+            key: time_error(field, initial, times, radius=model.radius, **controls) / model.radius
+            for key, field in fields.items()
+        }
+    calls = []
+    integrate = evolution.integrate_field
+
+    def counted(field, *args, **kwargs):
+        calls.append(field)
+        return integrate(field, *args, **kwargs)
+
+    monkeypatch.setattr(evolution, "integrate_field", counted)
+    monkeypatch.setattr(_evaluation, "integrate_field", counted)
+    report = model.evaluate_trajectories(initial, times, refine=True, **controls)
+
+    assert calls == list(fields.values()) * 2
+    for key, values in expected.items():
+        torch.testing.assert_close(report[f"{key}_refinement"], values, atol=0, rtol=0)
 
 
 def test_exit_statistics_keep_surviving_paths_and_never_evaluate_exterior():

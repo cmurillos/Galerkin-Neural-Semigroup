@@ -2,7 +2,7 @@ import unittest
 from copy import deepcopy
 
 import torch
-from ngfield import multi_indices
+from ngfield import multi_indices, state_derivatives
 
 from galerkin_neural_semigroup._network import _LocalBallField, _SpectralMLP, _UnitBallField
 from galerkin_neural_semigroup.problem import _field_loss
@@ -111,6 +111,19 @@ class SpectralMLPTests(unittest.TestCase):
         field(differentiable).sum().backward()
         self.assertTrue(torch.isfinite(differentiable.grad).all())
         self.assertTrue(all(parameter.grad is None for parameter in field.parameters()))
+
+    def test_first_derivative_evaluation_keeps_unwrapped_cached_weights(self):
+        core = _SpectralMLP(2, (3,), 0.7, device="cpu", dtype=torch.float64)
+        field = _LocalBallField(core, radius=2.0, sobolev_order=1).eval()
+        state = torch.tensor([0.1, -0.2], dtype=field.dtype, requires_grad=True)
+
+        derivatives = state_derivatives(field, state, 1)
+
+        for value in (*core.effective_weights(), *core.effective_biases()):
+            self.assertFalse(torch._C._functorch.is_functorch_wrapped_tensor(value))
+        torch.testing.assert_close(derivatives[(0, 0)], field(state))
+        derivatives[(0, 0)].sum().backward()
+        self.assertTrue(torch.isfinite(state.grad).all())
 
     def test_state_contract_is_strict(self):
         field = _SpectralMLP(

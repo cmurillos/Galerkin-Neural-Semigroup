@@ -91,6 +91,12 @@ class _MLP(nn.Module):
             return self._evaluation_biases
         return tuple(self.biases)
 
+    def _prepare_state_derivatives(self):
+        if not self.training:
+            # Keep persistent evaluation tensors outside the forward-AD transforms.
+            self.effective_weights()
+            self.effective_biases()
+
     def _clear_evaluation_cache(self):
         self._evaluation_weights = None
         self._evaluation_biases = None
@@ -200,6 +206,9 @@ class _LocalBallField(nn.Module):
         if not bool(torch.all(torch.linalg.vector_norm(states, dim=-1) < self.radius)):
             raise ValueError("states must lie strictly inside the open ball.")
 
+    def _prepare_state_derivatives(self):
+        self.core._prepare_state_derivatives()
+
     def normalized(self, states):
         self.core._states(states)
         if not bool(torch.isfinite(states).all()) or not bool(
@@ -289,6 +298,9 @@ class _UnitBallField(nn.Module):
 
     def _states(self, states):
         self.core._states(states)
+
+    def _prepare_state_derivatives(self):
+        self.core._prepare_state_derivatives()
 
     def normalized(self, states):
         """Evaluate the deployed field in normalized coordinates."""

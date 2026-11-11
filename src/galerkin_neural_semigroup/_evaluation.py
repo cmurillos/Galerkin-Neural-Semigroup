@@ -2,6 +2,7 @@
 
 import torch
 from ngfield import DomainExitError, integrate_field, multi_indices, state_derivatives, time_error
+from ngfield.evolution import _time_error
 
 from ._network import OPEN_BALL_DOMAIN
 from ._sampling import unit_ball_targets
@@ -162,8 +163,24 @@ def _velocities(model, paths, *, reference, batch_size=128):
     return output
 
 
-def _refinement(field, states, times, *, radius, order, step, tolerance):
+def _refinement(field, states, times, *, radius, order, step, tolerance, coarse=None):
     """Reuse NGF's indicator and leave undefined values after numerical exit."""
+    if coarse is not None:
+        with torch.no_grad():
+            try:
+                return _time_error(
+                    field,
+                    states.contiguous(),
+                    times,
+                    radius=radius,
+                    order=order,
+                    step=step,
+                    tolerance=tolerance,
+                    coarse=coarse,
+                )
+            except DomainExitError:
+                # Preserve the existing batch splitting and prefix checks on exit.
+                pass
     result = states.new_full((len(times), len(states)), float("nan"))
 
     def fill(indices):
@@ -299,10 +316,24 @@ def evaluate_trajectories(
     }
     if refine:
         report["reference_refinement"] = (
-            _refinement(reference, initial_states, times, **common) / model.radius
+            _refinement(
+                reference,
+                initial_states,
+                times,
+                **common,
+                coarse=g_paths if bool(g_alive.all()) else None,
+            )
+            / model.radius
         )
         report["learned_refinement"] = (
-            _refinement(model.field, initial_states, times, **common) / model.radius
+            _refinement(
+                model.field,
+                initial_states,
+                times,
+                **common,
+                coarse=f_paths if bool(f_alive.all()) else None,
+            )
+            / model.radius
         )
         g_valid = torch.isfinite(report["reference_refinement"])
         f_valid = torch.isfinite(report["learned_refinement"])
